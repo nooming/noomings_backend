@@ -22,6 +22,18 @@ CORS(app, resources={
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
         "supports_credentials": False  # 当origins为*时，不能设置credentials
+    },
+    r"/locate_city": {
+        "origins": "*",
+        "methods": ["GET", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+        "supports_credentials": False
+    },
+    r"/search_image": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+        "supports_credentials": False
     }
 })
 
@@ -34,8 +46,10 @@ def index():
 # ！！！替换为你自己的高德API Key（必须开通：地理编码、步行路线、POI搜索权限）！！！
 AMAP_KEY = "083ed6a4ffab4ab6aded4ecc383a30bb"  # 示例："083ed6a4ffab4ab6aded4ecc383a30bb"
 
+# 高德静态地图API Key（专门用于生成背景图）
+AMAP_STATIC_MAP_KEY = "a84ad5d57a96deaa8116818ef1a1ab67"
+
 # ==================== 核心配置（含POI过滤规则） ====================
-TARGET_CITY = "上海市"
 ROUTE_SAMPLE_INTERVAL = 500  # 每500米在最短路线上取1个采样点
 MAX_SAMPLE_POINTS = 8  # 最多8个采样点
 POI_SEARCH_RADIUS = 800  # 每个采样点搜索周边800米（适度范围，兼顾质量和覆盖）
@@ -165,15 +179,17 @@ def haversine(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     return c * r
 
 
-def get_geo_code(address: str) -> Tuple[float, float]:
-    """地址转经纬度（强制上海，增加容错）"""
+def get_geo_code(address: str, city: str = None) -> Tuple[float, float]:
+    """地址转经纬度（支持全国任意城市）"""
     url = "https://restapi.amap.com/v3/geocode/geo"
     params = {
         "key": AMAP_KEY,
         "address": address,
-        "city": "上海市",
         "output": "json"
     }
+    # 如果指定了城市，则添加城市参数
+    if city:
+        params["city"] = city
 
     for retry in range(3):
         try:
@@ -188,15 +204,40 @@ def get_geo_code(address: str) -> Tuple[float, float]:
             logging.warning(f"地理编码重试{retry + 1}失败：{str(e)}")
             time.sleep(0.5)
 
-    # 兜底：返回上海核心区坐标（避免解析失败导致400）
-    logging.error(f"地址 {address} 解析失败，使用上海核心区兜底坐标")
-    return 121.4737, 31.2304  # 上海市中心经纬度
+    # 兜底：返回北京核心区坐标（避免解析失败导致400）
+    logging.error(f"地址 {address} 解析失败，使用北京核心区兜底坐标")
+    return 116.4074, 39.9042  # 北京市中心经纬度
 
 
-def is_poi_in_shanghai(poi: Dict) -> bool:
-    """校验POI是否在上海"""
+def is_poi_in_target_city(poi: Dict, target_city: str = None) -> bool:
+    """校验POI是否在目标城市（支持全国任意城市）"""
+    if not target_city:
+        return True  # 未指定城市时，接受所有POI
     city = poi.get("cityname", "") or poi.get("pname", "")
-    return "上海" in city
+    # 支持多种匹配方式：完全匹配、包含匹配
+    return target_city in city or city in target_city
+
+
+def get_city_from_location(lng: float, lat: float) -> Optional[str]:
+    """通过坐标逆地理编码获取城市名"""
+    url = "https://restapi.amap.com/v3/geocode/regeo"
+    params = {
+        "key": AMAP_KEY,
+        "location": f"{lng},{lat}",
+        "extensions": "base",
+        "output": "json"
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "1" and data.get("regeocode"):
+            comp = data["regeocode"]["addressComponent"]
+            city = comp.get("city", "") or comp.get("province", "")
+            return city.replace("市", "") if city else None
+    except Exception as e:
+        logging.warning(f"逆地理编码获取城市失败：{str(e)}")
+    return None
 
 
 def filter_low_value_poi(poi: Dict, poi_type: str) -> bool:
@@ -288,7 +329,7 @@ def get_shortest_route(start: Tuple[float, float], end: Tuple[float, float]) -> 
 
 
 def sample_poi_along_shortest_route(route_points: List[Tuple[float, float]],
-                                    poi_type: str) -> List[Dict]:
+                                    poi_type: str, target_city: str = None) -> List[Dict]:
     """第二步：沿最短路线采样POI（严格贴合路线 + 过滤低价值）"""
     # 1. 沿最短路线均匀取采样点（每500米1个，最多8个）
     sample_points = []
@@ -318,7 +359,7 @@ def sample_poi_along_shortest_route(route_points: List[Tuple[float, float]],
     sample_points = sample_points[:MAX_SAMPLE_POINTS]
     logging.info(f"沿最短路线生成采样点：{len(sample_points)}个（严格贴合路线）")
 
-    # 2. 每个采样点搜索周边POI（仅上海+过滤低价值）
+    # 2. 每个采样点搜索周边POI（支持全国任意城市+过滤低价值）
     target_keywords = list(VALID_POI_WEIGHT.get(poi_type, {}).keys()) or ["咖啡馆", "甜品店", "公园"]
 
     all_pois = []
@@ -326,19 +367,21 @@ def sample_poi_along_shortest_route(route_points: List[Tuple[float, float]],
     used_poi_locations = set()  # 用于坐标去重（避免同一地点不同名称的重复）
 
     for idx, (lng, lat) in enumerate(sample_points):
-        # 搜索采样点周边800米的POI（强制上海）
+        # 搜索采样点周边800米的POI（支持全国任意城市）
         url = "https://restapi.amap.com/v3/place/around"
         params = {
             "key": AMAP_KEY,
             "location": f"{lng:.6f},{lat:.6f}",
             "radius": POI_SEARCH_RADIUS,
             "keywords": "|".join(target_keywords),
-            "city": "上海市",
             "offset": 20,
             "page": 1,
             "output": "json",
             "sortrule": "distance"  # 按离采样点的距离排序（最贴合路线）
         }
+        # 如果指定了目标城市，添加城市参数
+        if target_city:
+            params["city"] = target_city
 
         try:
             resp = requests.get(url, params=params, timeout=10)
@@ -347,9 +390,9 @@ def sample_poi_along_shortest_route(route_points: List[Tuple[float, float]],
             if data.get("status") != "1":
                 continue
 
-            # 筛选：上海 + 未重复 + 过滤低价值 + 匹配类型
+            # 筛选：目标城市 + 未重复 + 过滤低价值 + 匹配类型
             for poi in data.get("pois", []):
-                if not is_poi_in_shanghai(poi):
+                if target_city and not is_poi_in_target_city(poi, target_city):
                     continue
                 poi_name = poi.get("name", "").strip()
                 if not poi_name:
@@ -539,7 +582,7 @@ def generate_new_route(start: Tuple[float, float], end: Tuple[float, float],
 # ==================== 核心接口（修复400错误） ====================
 @app.route('/plan', methods=['POST', 'OPTIONS'])
 def plan_route():
-    """核心接口：最短路线→沿路线选高价值POI→筛选→新路线"""
+    """核心接口：最短路线→沿路线选高价值POI→筛选→新路线（支持全国任意城市）"""
     # 处理预检请求 - CORS扩展会自动处理响应头
     if request.method == 'OPTIONS':
         return jsonify({"success": True})
@@ -558,6 +601,7 @@ def plan_route():
         end_raw = data.get("end", "")
         plan_time = int(data.get("plan_time", 60))  # 兜底60分钟
         poi_type = data.get("poi_type", "无偏好").strip() or "无偏好"
+        target_city = data.get("city", "").strip() or None  # 目标城市（新增参数）
 
         # 解析起点：支持 [lng, lat] 数组或地址字符串
         start_lng, start_lat = None, None
@@ -569,7 +613,7 @@ def plan_route():
             # 传来的是地址字符串
             start_address = start_raw.strip()
         else:
-            start_address = "上海市黄浦区外滩"  # 兜底默认值
+            start_address = "北京市东城区天安门"  # 兜底默认值改为北京
 
         # 解析终点：支持 [lng, lat] 数组或地址字符串
         end_lng, end_lat = None, None
@@ -581,7 +625,7 @@ def plan_route():
             # 传来的是地址字符串
             end_address = end_raw.strip()
         else:
-            end_address = "上海市静安区南京西路"  # 兜底默认值
+            end_address = "北京市西城区王府井"  # 兜底默认值改为北京
 
         # 友好的参数校验（返回明确错误，而非直接400）
         error_msg = None
@@ -596,17 +640,24 @@ def plan_route():
         # 2. 第一步：获取起点→终点的最短路线
         # 如果前端传来的是坐标数组，直接使用；否则进行地理编码
         if start_lng is None or start_lat is None:
-            start_lng, start_lat = get_geo_code(start_address)
+            start_lng, start_lat = get_geo_code(start_address, target_city)
         if end_lng is None or end_lat is None:
-            end_lng, end_lat = get_geo_code(end_address)
+            end_lng, end_lat = get_geo_code(end_address, target_city)
         start = (start_lng, start_lat)
         end = (end_lng, end_lat)
+
+        # 如果没有指定城市，尝试从起点坐标反推城市
+        if not target_city:
+            detected_city = get_city_from_location(start_lng, start_lat)
+            if detected_city:
+                target_city = detected_city
+                logging.info(f"自动识别城市：{target_city}")
 
         shortest_route = get_shortest_route(start, end)
         logging.info(f"最短路线：距离{shortest_route['total_distance']}米，耗时{shortest_route['total_duration']}分钟")
 
         # 3. 第二步：沿最短路线采样高价值POI（过滤无效/低价值）
-        route_pois = sample_poi_along_shortest_route(shortest_route["route_points"], poi_type)
+        route_pois = sample_poi_along_shortest_route(shortest_route["route_points"], poi_type, target_city)
         if not route_pois:
             return jsonify({
                 "success": True,
@@ -678,6 +729,230 @@ def plan_route():
             "message": f"服务器内部错误：{str(e)}",
             "error_type": type(e).__name__
         }), 500
+
+
+# ==================== 图片搜索API ====================
+def get_district_by_coords(lng: float, lat: float) -> dict:
+    """通过坐标逆地理编码，精确到区/县级"""
+    url = "https://restapi.amap.com/v3/geocode/regeo"
+    params = {
+        "key": AMAP_KEY,
+        "location": f"{lng},{lat}",
+        "extensions": "base",
+        "output": "json"
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "1" and data.get("regeocode"):
+            comp = data["regeocode"]["addressComponent"]
+            city = comp.get("city", "") or comp.get("province", "")
+            district = comp.get("district", "")
+            township = comp.get("township", "")
+            return {
+                "city": city.replace("市", ""),
+                "district": district.replace("区", "").replace("县", ""),
+                "township": township,
+                "raw_district": district,  # 保留原始区/县名
+            }
+    except Exception as e:
+        logging.warning(f"逆地理编码失败：{str(e)}")
+    return {}
+
+
+def get_amap_static_map_url(lng: float, lat: float, zoom: int = 15) -> Optional[str]:
+    """生成高德卫星静态地图URL（精确到起点坐标，使用专用静态地图Key）"""
+    if not lng or not lat:
+        return None
+    base_url = "https://restapi.amap.com/v3/staticmap"
+    # style=7 卫星图，scale=2 高清，添加中心标记点
+    marker = f"mid,,A:{lng:.6f},{lat:.6f}"
+    params = (
+        f"key={AMAP_STATIC_MAP_KEY}"
+        f"&location={lng:.6f},{lat:.6f}"
+        f"&zoom={zoom}"
+        f"&size=1600*900"
+        f"&scale=2"
+        f"&style=7"
+        f"&markers={marker}"
+    )
+    return f"{base_url}?{params}"
+
+
+def smart_image_search(queries: list, lng: float = None, lat: float = None, city: str = "") -> Optional[str]:
+    """生成分享图背景：直接使用高德静态地图API"""
+    if lng and lat:
+        result = get_amap_static_map_url(lng, lat)
+        if result:
+            logging.info(f"使用高德卫星地图：lng={lng}, lat={lat}")
+            return result
+    return None
+
+
+@app.route('/search_image', methods=['POST', 'OPTIONS'])
+def search_location_image():
+    """搜索地点美图接口（支持坐标精确到区/县级）"""
+    if request.method == 'OPTIONS':
+        return jsonify({"success": True})
+
+    try:
+        data = request.get_json(silent=True) or {}
+        city = data.get("city", "").strip()
+        poi_name = data.get("poi_name", "").strip()   # 第一个POI名称
+        start_lng = data.get("start_lng")              # 起点经度
+        start_lat = data.get("start_lat")              # 起点纬度
+
+        # 精确到区/县级：通过坐标逆地理编码
+        district_info = {}
+        if start_lng and start_lat:
+            district_info = get_district_by_coords(float(start_lng), float(start_lat))
+            logging.info(f"逆地理编码结果：{district_info}")
+
+        city_name = district_info.get("city") or city or "上海"
+        district_name = district_info.get("raw_district") or ""  # 如"浦东新区"
+
+        # 构建多级搜索关键词列表（由精确到宽泛）
+        queries = []
+
+        # 最精确：城市+区县+POI
+        if district_name and poi_name:
+            queries.append(f"{city_name}{district_name} {poi_name}")
+        # 城市+POI
+        if poi_name:
+            queries.append(f"{city_name} {poi_name}")
+        # 城市+区县
+        if district_name:
+            queries.append(f"{city_name}{district_name}")
+        # 仅城市
+        queries.append(city_name)
+
+        logging.info(f"图片搜索关键词队列：{queries}")
+
+        image_url = smart_image_search(
+            queries,
+            lng=float(start_lng) if start_lng else None,
+            lat=float(start_lat) if start_lat else None,
+            city=city_name
+        )
+
+        if image_url:
+            return jsonify({
+                "success": True,
+                "image_url": image_url,
+                "query_used": queries[0] if queries else "",
+                "district": district_name,
+                "city": city_name
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "未找到相关图片，将使用默认背景"
+            }), 404
+
+    except Exception as e:
+        logging.error(f"图片搜索接口异常：{str(e)}")
+        return jsonify({"success": False, "message": f"服务器错误：{str(e)}"}), 500
+
+
+@app.route('/locate_city', methods=['GET', 'OPTIONS'])
+def locate_city():
+    """IP定位城市接口 - 优先使用前端传递的坐标进行逆地理编码"""
+    if request.method == 'OPTIONS':
+        return jsonify({"success": True})
+
+    try:
+        # 尝试获取前端传递的坐标参数
+        lng = request.args.get('lng', type=float)
+        lat = request.args.get('lat', type=float)
+
+        # 如果有坐标，使用逆地理编码获取城市
+        if lng and lat:
+            url = "https://restapi.amap.com/v3/geocode/regeo"
+            params = {
+                "key": AMAP_KEY,
+                "location": f"{lng},{lat}",
+                "extensions": "base",
+                "output": "json"
+            }
+
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+
+            if data.get("status") == "1" and data.get("regeocode"):
+                address = data["regeocode"]["addressComponent"]
+                city = address.get("city", "")
+                province = address.get("province", "")
+
+                # 处理直辖市的情况
+                if not city and province in ["北京市", "上海市", "天津市", "重庆市"]:
+                    city = province.replace("市", "")
+
+                if city:
+                    return jsonify({
+                        "success": True,
+                        "city": city.replace("市", ""),
+                        "province": province,
+                        "center": [lng, lat],
+                        "source": "browser_geolocation"
+                    })
+
+        # 降级：使用高德IP定位API（服务器IP）
+        url = "https://restapi.amap.com/v3/ip"
+        params = {
+            "key": AMAP_KEY,
+            "output": "json"
+        }
+
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("status") == "1" and data.get("city"):
+            city = data.get("city", "").replace("市", "")
+            province = data.get("province", "")
+            rectangle = data.get("rectangle", "")
+
+            # 解析矩形区域获取中心点坐标
+            center_lng, center_lat = 116.4074, 39.9042
+            if rectangle:
+                try:
+                    coords = rectangle.split(";")
+                    if len(coords) == 2:
+                        lng1, lat1 = map(float, coords[0].split(","))
+                        lng2, lat2 = map(float, coords[1].split(","))
+                        center_lng = (lng1 + lng2) / 2
+                        center_lat = (lat1 + lat2) / 2
+                except:
+                    pass
+
+            return jsonify({
+                "success": True,
+                "city": city,
+                "province": province,
+                "center": [center_lng, center_lat],
+                "source": "ip_location"
+            })
+        else:
+            # 返回默认城市（北京）
+            return jsonify({
+                "success": True,
+                "city": "北京",
+                "province": "北京市",
+                "center": [116.4074, 39.9042],
+                "source": "default"
+            })
+
+    except Exception as e:
+        logging.error(f"定位异常：{str(e)}")
+        return jsonify({
+            "success": True,
+            "city": "北京",
+            "province": "北京市",
+            "center": [116.4074, 39.9042],
+            "source": "default"
+        })
 
 
 # ==================== 启动 ====================
