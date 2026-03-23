@@ -283,7 +283,7 @@ def filter_low_value_poi(poi: Dict, poi_type: str) -> bool:
 
 # ==================== 核心逻辑：沿最短路线操作 ====================
 def get_shortest_route(start: Tuple[float, float], end: Tuple[float, float]) -> Dict:
-    """第一步：获取起点→终点的最短步行路线（仅上海）"""
+    """第一步：获取起点→终点的最短步行路线（高德步行规划，起终点为全国有效坐标即可）"""
     url = "https://restapi.amap.com/v3/direction/walking"
     params = {
         "key": AMAP_KEY,
