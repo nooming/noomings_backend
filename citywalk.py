@@ -12,7 +12,6 @@ from math import radians, cos, sin, asin, sqrt
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from parking_api import parking_bp
 
 # ==================== 基础配置 ====================
 import os
@@ -46,9 +45,6 @@ CORS(app, resources={
         "supports_credentials": False
     }
 })
-
-# 挂载停车优化接口：/api/default、/api/optimize
-app.register_blueprint(parking_bp)
 
 # 静态文件服务 - 支持前端直接访问
 @app.route('/')
