@@ -60,10 +60,11 @@ AMAP_STATIC_MAP_KEY = "a84ad5d57a96deaa8116818ef1a1ab67"
 
 # ==================== 核心配置（含POI过滤规则） ====================
 ROUTE_SAMPLE_INTERVAL = 500  # 每500米在最短路线上取1个采样点
-MAX_SAMPLE_POINTS = 8  # 最多8个采样点
-POI_SEARCH_RADIUS = 800  # 每个采样点搜索周边800米（适度范围，兼顾质量和覆盖）
-POI_PER_SAMPLE = 3  # 每个采样点取3个POI
+MAX_SAMPLE_POINTS = 12  # 最多12个采样点（提升大城市长路线覆盖）
+POI_SEARCH_RADIUS = 1000  # 每个采样点搜索周边1000米（提升召回）
+POI_PER_SAMPLE = 5  # 每个采样点取5个POI（提升可用候选）
 # 注意：选定POI后会重新规划路线经过这些POI，所以不需要严格的距离限制
+DEBUG_PLAN_LOG = os.environ.get("CITYWALK_DEBUG_PLAN", "false").lower() == "true"
 
 # POI类型图标映射
 POI_TYPE_ICONS = {
@@ -144,6 +145,41 @@ VALID_POI_WEIGHT = {
     "商场": {"商场": 10, "购物中心": 9, "购物广场": 8, "商业中心": 7}
 }
 
+# 氛围语义权重（用于路线氛围评分）
+AMBIENCE_PROFILE_WEIGHTS = {
+    "无偏好": {"咖啡馆": 6, "甜品店": 6, "花店": 6, "公园": 6, "商场": 5, "面包店": 5},
+    "自然": {"公园": 10, "景区": 10, "绿地": 8, "湿地公园": 9, "森林公园": 9},
+    "历史": {"纪念馆": 10, "博物馆": 10, "历史古迹": 10, "名人故居": 9, "文博馆": 8},
+    "文创": {"美术馆": 10, "创意园区": 10, "艺术中心": 8, "文创空间": 8, "展览馆": 8},
+    "花店": {"花店": 10, "花艺店": 9, "鲜花店": 9, "花艺馆": 8},
+    "咖啡": {"咖啡馆": 10, "咖啡屋": 9, "咖啡店": 9, "咖啡体验馆": 8},
+    "甜品": {"甜品店": 10, "奶茶店": 9, "糖水铺": 8, "饮品店": 7},
+    "烘焙": {"面包店": 10, "烘焙店": 9, "蛋糕店": 9, "西点店": 8},
+    "商场": {"商场": 10, "购物中心": 9, "购物广场": 8, "商业中心": 7}
+}
+
+# 路线风格权重：语义与绕路的平衡配置
+ROUTE_STYLE_CONFIG = {
+    "balanced": {
+        "semantic_weight": 1.0,
+        "detour_weight": 0.45,
+        "max_detour_cost": 20.0,  # 距离惩罚上限，避免远点吞噬分数
+        "min_spacing_m": 180  # 全局筛选时相邻POI最小间距
+    },
+    "atmosphere_first": {
+        "semantic_weight": 1.2,
+        "detour_weight": 0.25,
+        "max_detour_cost": 26.0,
+        "min_spacing_m": 140
+    },
+    "efficiency_first": {
+        "semantic_weight": 0.8,
+        "detour_weight": 0.7,
+        "max_detour_cost": 14.0,
+        "min_spacing_m": 220
+    }
+}
+
 # 日志配置（生产环境使用INFO级别）
 logging.basicConfig(
     level=logging.INFO,
@@ -218,13 +254,36 @@ def get_geo_code(address: str, city: str = None) -> Tuple[float, float]:
     return 116.4074, 39.9042  # 北京市中心经纬度
 
 
+def normalize_city_name(city: str) -> str:
+    """城市名规范化：去后缀、空白与大小写差异。"""
+    if not city:
+        return ""
+    normalized = city.strip().lower().replace(" ", "")
+    suffixes = ("特别行政区", "自治州", "地区", "盟", "州", "市")
+    for suffix in suffixes:
+        if normalized.endswith(suffix):
+            normalized = normalized[:-len(suffix)]
+            break
+    return normalized
+
+
 def is_poi_in_target_city(poi: Dict, target_city: str = None) -> bool:
-    """校验POI是否在目标城市（支持全国任意城市）"""
+    """校验POI是否在目标城市（宽容匹配，避免误删同城POI）。"""
     if not target_city:
         return True  # 未指定城市时，接受所有POI
-    city = poi.get("cityname", "") or poi.get("pname", "")
-    # 支持多种匹配方式：完全匹配、包含匹配
-    return target_city in city or city in target_city
+
+    target_norm = normalize_city_name(target_city)
+    cityname_norm = normalize_city_name(poi.get("cityname", ""))
+    pname_norm = normalize_city_name(poi.get("pname", ""))
+
+    # 优先使用 cityname 匹配；cityname 缺失时，不强依赖 pname 做拒绝。
+    if cityname_norm:
+        return target_norm in cityname_norm or cityname_norm in target_norm
+
+    # 对于仅有省名、无 cityname 的结果，降级为保守放行，避免误杀。
+    if pname_norm:
+        return True
+    return True
 
 
 def get_city_from_location(lng: float, lat: float) -> Optional[str]:
@@ -290,6 +349,49 @@ def filter_low_value_poi(poi: Dict, poi_type: str) -> bool:
     return False
 
 
+def resolve_ambience_profile(poi_type: str, ambience_profile: str = None) -> str:
+    """解析氛围画像：优先使用显式参数，否则退回 poi_type。"""
+    candidate = (ambience_profile or poi_type or "无偏好").strip()
+    if candidate in AMBIENCE_PROFILE_WEIGHTS:
+        return candidate
+    return "无偏好"
+
+
+def score_poi_ambience(poi: Dict, poi_type: str, ambience_profile: str, route_style: str,
+                       dist_to_route: float) -> Dict:
+    """计算POI氛围分、绕路惩罚与综合分。"""
+    profile = resolve_ambience_profile(poi_type, ambience_profile)
+    profile_weights = AMBIENCE_PROFILE_WEIGHTS.get(profile, {})
+    style_cfg = ROUTE_STYLE_CONFIG.get(route_style, ROUTE_STYLE_CONFIG["balanced"])
+
+    poi_name = (poi.get("name", "") or "").strip().lower()
+    poi_type_str = (poi.get("type", "") or "").strip().lower()
+    matched_tags = []
+    semantic_score = 0.0
+    for key, weight in profile_weights.items():
+        key_norm = key.lower()
+        if key_norm in poi_name or key_norm in poi_type_str:
+            matched_tags.append(key)
+            semantic_score += float(weight)
+
+    # 将距离转换为温和惩罚（每100米记1分），并限制上限
+    detour_cost = min(dist_to_route / 100.0, style_cfg["max_detour_cost"])
+    final_score = style_cfg["semantic_weight"] * semantic_score - style_cfg["detour_weight"] * detour_cost
+    reason = (
+        f"命中偏好标签{len(matched_tags)}个，离路线约{int(dist_to_route)}米"
+        if matched_tags else
+        f"位置贴近路线（约{int(dist_to_route)}米）"
+    )
+    return {
+        "ambience_profile": profile,
+        "ambience_tags": matched_tags,
+        "semantic_score": round(semantic_score, 3),
+        "detour_cost": round(detour_cost, 3),
+        "final_score": round(final_score, 3),
+        "recommendation_reason": reason
+    }
+
+
 # ==================== 核心逻辑：沿最短路线操作 ====================
 def get_shortest_route(start: Tuple[float, float], end: Tuple[float, float]) -> Dict:
     """第一步：获取起点→终点的最短步行路线（高德步行规划，起终点为全国有效坐标即可）"""
@@ -338,9 +440,11 @@ def get_shortest_route(start: Tuple[float, float], end: Tuple[float, float]) -> 
 
 
 def sample_poi_along_shortest_route(route_points: List[Tuple[float, float]],
-                                    poi_type: str, target_city: str = None) -> List[Dict]:
-    """第二步：沿最短路线采样POI（严格贴合路线 + 过滤低价值）"""
-    # 1. 沿最短路线均匀取采样点（每500米1个，最多8个）
+                                    poi_type: str, target_city: str = None,
+                                    route_style: str = "balanced",
+                                    ambience_profile: str = None) -> List[Dict]:
+    """第二步：沿最短路线采样POI（语义氛围+距离平衡评分）"""
+    # 1. 沿最短路线均匀取采样点（每500米1个，最多12个）
     sample_points = []
     current_distance = 0
     prev_point = route_points[0]
@@ -364,16 +468,27 @@ def sample_poi_along_shortest_route(route_points: List[Tuple[float, float]],
     if sample_points[-1] != route_points[-1] and len(sample_points) < MAX_SAMPLE_POINTS:
         sample_points.append(route_points[-1])
 
-    # 限制最多8个采样点
+    # 限制最多12个采样点
     sample_points = sample_points[:MAX_SAMPLE_POINTS]
     logging.info(f"沿最短路线生成采样点：{len(sample_points)}个（严格贴合路线）")
 
     # 2. 每个采样点搜索周边POI（支持全国任意城市+过滤低价值）
-    target_keywords = list(VALID_POI_WEIGHT.get(poi_type, {}).keys()) or ["咖啡馆", "甜品店", "公园"]
+    profile = resolve_ambience_profile(poi_type, ambience_profile)
+    target_keywords = list(AMBIENCE_PROFILE_WEIGHTS.get(profile, {}).keys()) or ["咖啡馆", "甜品店", "公园"]
+    normalized_target_city = normalize_city_name(target_city) if target_city else ""
 
     all_pois = []
     used_poi_names = set()
     used_poi_locations = set()  # 用于坐标去重（避免同一地点不同名称的重复）
+    debug_stats = {
+        "total_raw_pois": 0,
+        "filtered_by_city": 0,
+        "filtered_by_name_or_location": 0,
+        "filtered_by_low_value": 0,
+        "kept_pois": 0,
+        "sample_points": len(sample_points),
+        "per_sample": []
+    }
 
     for idx, (lng, lat) in enumerate(sample_points):
         # 搜索采样点周边800米的POI（支持全国任意城市）
@@ -384,7 +499,6 @@ def sample_poi_along_shortest_route(route_points: List[Tuple[float, float]],
             "radius": POI_SEARCH_RADIUS,
             "keywords": "|".join(target_keywords),
             "offset": 20,
-            "page": 1,
             "output": "json",
             "sortrule": "distance"  # 按离采样点的距离排序（最贴合路线）
         }
@@ -392,81 +506,139 @@ def sample_poi_along_shortest_route(route_points: List[Tuple[float, float]],
         if target_city:
             params["city"] = target_city
 
+        sample_candidates = []
+        sample_seen_names = set()
+        sample_seen_locations = set()
+        sample_debug = {"sample_idx": idx, "raw_page1": 0, "raw_page2": 0, "kept": 0}
+
         try:
-            resp = requests.get(url, params=params, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("status") != "1":
-                continue
-
-            # 筛选：目标城市 + 未重复 + 过滤低价值 + 匹配类型
-            for poi in data.get("pois", []):
-                if target_city and not is_poi_in_target_city(poi, target_city):
-                    continue
-                poi_name = poi.get("name", "").strip()
-                if not poi_name:
-                    continue
-
-                # 格式化POI（保留离路线的距离，用于排序）
-                poi_lng, poi_lat = map(float, poi.get("location", "0,0").split(","))
-
-                # 去重检查1：按名称去重
-                if poi_name in used_poi_names:
-                    continue
-
-                # 去重检查2：按坐标去重（同一地点50米范围内视为同一POI）
-                is_duplicate_location = False
-                for used_lng, used_lat in used_poi_locations:
-                    if haversine(poi_lng, poi_lat, used_lng, used_lat) < 50:  # 50米内视为同一地点
-                        is_duplicate_location = True
-                        logging.debug(f"坐标去重：{poi_name} 与已有POI位置重复（<50米）")
-                        break
-                if is_duplicate_location:
-                    continue
-
-                # 核心：过滤无效/低价值POI
-                if not filter_low_value_poi(poi, poi_type):
-                    continue
-
-                # 计算POI到当前采样点的距离（用于排序，优先选近的）
-                dist_to_route = haversine(lng, lat, poi_lng, poi_lat)
-
-                # 获取POI类型图标
-                poi_type_str = poi.get("type", "").split(";")[0]
-                poi_icon = "📍"  # 默认图标
-                for key, icon in POI_TYPE_ICONS.items():
-                    if key in poi_name or key in poi_type_str:
-                        poi_icon = icon
-                        break
-
-                all_pois.append({
-                    "name": poi_name,
-                    "address": poi.get("address", "暂无地址"),
-                    "location": [poi_lng, poi_lat],
-                    "type": poi_type_str,
-                    "icon": poi_icon,  # POI类型图标
-                    "dist_to_route": dist_to_route,  # 离采样点的距离（米）
-                    "sample_idx": idx  # 记录属于哪个采样点
-                })
-                used_poi_names.add(poi_name)
-                used_poi_locations.add((poi_lng, poi_lat))
-
-                # 每个采样点最多取3个有效POI
-                sample_poi_count = sum(1 for p in all_pois if p.get('sample_idx') == idx)
-                if sample_poi_count >= POI_PER_SAMPLE:
+            for page in (1, 2):
+                # 第二页仅做兜底：第一页不足且第一页已命中满页时才继续
+                if page == 2 and sample_debug["raw_page1"] < params["offset"]:
                     break
+
+                page_params = dict(params)
+                page_params["page"] = page
+                resp = requests.get(url, params=page_params, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("status") != "1":
+                    continue
+
+                pois = data.get("pois", [])
+                debug_stats["total_raw_pois"] += len(pois)
+                if page == 1:
+                    sample_debug["raw_page1"] = len(pois)
+                else:
+                    sample_debug["raw_page2"] = len(pois)
+
+                # 筛选：目标城市 + 未重复 + 过滤低价值 + 匹配类型
+                for poi in pois:
+                    if normalized_target_city and not is_poi_in_target_city(poi, normalized_target_city):
+                        debug_stats["filtered_by_city"] += 1
+                        continue
+                    poi_name = poi.get("name", "").strip()
+                    if not poi_name:
+                        debug_stats["filtered_by_name_or_location"] += 1
+                        continue
+
+                    # 格式化POI（保留离路线的距离，用于排序）
+                    poi_lng, poi_lat = map(float, poi.get("location", "0,0").split(","))
+
+                    # 去重检查1：按名称去重
+                    if poi_name in used_poi_names or poi_name in sample_seen_names:
+                        debug_stats["filtered_by_name_or_location"] += 1
+                        continue
+
+                    # 去重检查2：按坐标去重（同一地点50米范围内视为同一POI）
+                    is_duplicate_location = False
+                    for used_lng, used_lat in used_poi_locations:
+                        if haversine(poi_lng, poi_lat, used_lng, used_lat) < 50:  # 50米内视为同一地点
+                            is_duplicate_location = True
+                            logging.debug(f"坐标去重：{poi_name} 与已有POI位置重复（<50米）")
+                            break
+                    if not is_duplicate_location:
+                        for used_lng, used_lat in sample_seen_locations:
+                            if haversine(poi_lng, poi_lat, used_lng, used_lat) < 50:
+                                is_duplicate_location = True
+                                break
+                    if is_duplicate_location:
+                        debug_stats["filtered_by_name_or_location"] += 1
+                        continue
+
+                    # 核心：过滤无效/低价值POI
+                    if not filter_low_value_poi(poi, poi_type):
+                        debug_stats["filtered_by_low_value"] += 1
+                        continue
+
+                    # 计算POI到当前采样点的距离（用于排序，优先选近的）
+                    dist_to_route = haversine(lng, lat, poi_lng, poi_lat)
+
+                    # 获取POI类型图标
+                    poi_type_str = poi.get("type", "").split(";")[0]
+                    poi_icon = "📍"  # 默认图标
+                    for key, icon in POI_TYPE_ICONS.items():
+                        if key in poi_name or key in poi_type_str:
+                            poi_icon = icon
+                            break
+
+                    scoring = score_poi_ambience(
+                        poi=poi,
+                        poi_type=poi_type,
+                        ambience_profile=profile,
+                        route_style=route_style,
+                        dist_to_route=dist_to_route
+                    )
+                    sample_candidates.append({
+                        "name": poi_name,
+                        "address": poi.get("address", "暂无地址"),
+                        "location": [poi_lng, poi_lat],
+                        "type": poi_type_str,
+                        "icon": poi_icon,  # POI类型图标
+                        "dist_to_route": dist_to_route,  # 离采样点的距离（米）
+                        "ambience_profile": scoring["ambience_profile"],
+                        "ambience_tags": scoring["ambience_tags"],
+                        "semantic_score": scoring["semantic_score"],
+                        "detour_cost": scoring["detour_cost"],
+                        "final_score": scoring["final_score"],
+                        "recommendation_reason": scoring["recommendation_reason"],
+                        "sample_idx": idx  # 记录属于哪个采样点
+                    })
+                    sample_seen_names.add(poi_name)
+                    sample_seen_locations.add((poi_lng, poi_lat))
+            # 每个采样点优先保留综合分更高的 POI，避免全由最近点占满
+            sample_candidates.sort(key=lambda x: (-x["final_score"], x["dist_to_route"]))
+            selected_candidates = sample_candidates[:POI_PER_SAMPLE]
+            all_pois.extend(selected_candidates)
+            for picked in selected_candidates:
+                used_poi_names.add(picked["name"])
+                used_poi_locations.add((picked["location"][0], picked["location"][1]))
+            sample_debug["kept"] = len(selected_candidates)
+            debug_stats["kept_pois"] += len(selected_candidates)
         except Exception as e:
             logging.warning(f"采样点{idx + 1}搜索POI失败：{str(e)}")
             continue
+        finally:
+            debug_stats["per_sample"].append(sample_debug)
 
-    # 排序：优先离路线近的高价值POI
-    all_pois.sort(key=lambda x: x["dist_to_route"])
+    # 排序：综合分优先，距离次之
+    all_pois.sort(key=lambda x: (-x.get("final_score", 0.0), x["dist_to_route"]))
+    if DEBUG_PLAN_LOG:
+        logging.info(
+            f"[plan_debug] poi_recall city={target_city or 'auto'} samples={debug_stats['sample_points']} "
+            f"raw={debug_stats['total_raw_pois']} kept={debug_stats['kept_pois']} "
+            f"filtered_city={debug_stats['filtered_by_city']} "
+            f"filtered_dup_or_invalid={debug_stats['filtered_by_name_or_location']} "
+            f"filtered_low_value={debug_stats['filtered_by_low_value']} "
+            f"sample_detail={debug_stats['per_sample']}"
+        )
     return all_pois
 
 
 def filter_poi_for_route(pois: List[Dict], plan_time: int,
-                         original_route_duration: int) -> List[Dict]:
-    """第三步：筛选POI（匹配计划时间，仅保留高价值）"""
+                         original_route_duration: int,
+                         route_style: str = "balanced") -> List[Dict]:
+    """第三步：筛选POI（匹配计划时间，按氛围综合分做全局平衡）"""
     # 目标：总耗时 = 原始路线耗时 + POI游览时间 ≈ 计划时间
     target_total_duration = plan_time
     # 可用于POI游览的时间
@@ -476,11 +648,38 @@ def filter_poi_for_route(pois: List[Dict], plan_time: int,
     max_poi_count = int(available_stay_time / avg_poi_time)
 
     # 筛选规则：
-    # 1. 优先选离路线最近的（dist_to_route最小）
+    # 1. 按 final_score 从高到低优先
     # 2. 数量不超过max_poi_count（避免超时）
     # 3. 至少保留1个（如果有），最多12个
+    # 4. 相邻POI保持最小间距，避免路线节奏过密
     max_poi_count = min(max(max_poi_count, 1), 12)
-    filtered_pois = pois[:max_poi_count] if pois else []
+    if not pois:
+        filtered_pois = []
+    else:
+        style_cfg = ROUTE_STYLE_CONFIG.get(route_style, ROUTE_STYLE_CONFIG["balanced"])
+        min_spacing_m = style_cfg["min_spacing_m"]
+        sorted_pois = sorted(
+            pois,
+            key=lambda x: (-x.get("final_score", 0.0), x.get("dist_to_route", float("inf")))
+        )
+        filtered_pois = []
+        for poi in sorted_pois:
+            poi_lng, poi_lat = poi["location"]
+            too_close = False
+            for chosen in filtered_pois:
+                chosen_lng, chosen_lat = chosen["location"]
+                if haversine(poi_lng, poi_lat, chosen_lng, chosen_lat) < min_spacing_m:
+                    too_close = True
+                    break
+            if too_close:
+                continue
+            filtered_pois.append(poi)
+            if len(filtered_pois) >= max_poi_count:
+                break
+
+        # 兜底：如果间距约束过严导致为空，则退回分数Top1
+        if not filtered_pois and sorted_pois:
+            filtered_pois = sorted_pois[:1]
 
     logging.info(f"筛选后高价值POI数量：{len(filtered_pois)}，匹配计划时间{plan_time}分钟")
     return filtered_pois
@@ -606,7 +805,9 @@ def plan_route():
         end_raw = data.get("end", "")
         plan_time = int(data.get("plan_time", 60))  # 默认 60 分钟
         poi_type = data.get("poi_type", "无偏好").strip() or "无偏好"
-        target_city = data.get("city", "").strip() or None
+        route_style = data.get("route_style", "balanced").strip() or "balanced"
+        ambience_profile = data.get("ambience_profile", "").strip() or poi_type
+        target_city = normalize_city_name(data.get("city", "").strip()) or None
 
         start_lng, start_lat = None, None
         if isinstance(start_raw, list) and len(start_raw) == 2:
@@ -632,6 +833,8 @@ def plan_route():
             error_msg = "计划时间需在10-240分钟之间"
         elif poi_type not in VALID_POI_WEIGHT.keys():
             error_msg = f"POI类型仅支持：{list(VALID_POI_WEIGHT.keys())}"
+        elif route_style not in ROUTE_STYLE_CONFIG:
+            error_msg = f"route_style仅支持：{list(ROUTE_STYLE_CONFIG.keys())}"
 
         if error_msg:
             return jsonify({"success": False, "message": error_msg}), 400
@@ -648,18 +851,32 @@ def plan_route():
         if not target_city:
             detected_city = get_city_from_location(start_lng, start_lat)
             if detected_city:
-                target_city = detected_city
+                target_city = normalize_city_name(detected_city)
                 logging.info(f"自动识别城市：{target_city}")
 
         shortest_route = get_shortest_route(start, end)
         logging.info(f"最短路线：距离{shortest_route['total_distance']}米，耗时{shortest_route['total_duration']}分钟")
 
         # 沿路采样 POI（类型与权重见 VALID_POI_WEIGHT）
-        route_pois = sample_poi_along_shortest_route(shortest_route["route_points"], poi_type, target_city)
+        if DEBUG_PLAN_LOG:
+            logging.info(
+                f"[plan_debug] request city={target_city or 'auto'} poi_type={poi_type} "
+                f"route_style={route_style} ambience_profile={ambience_profile} "
+                f"plan_time={plan_time} start={start} end={end}"
+            )
+        route_pois = sample_poi_along_shortest_route(
+            shortest_route["route_points"],
+            poi_type,
+            target_city,
+            route_style,
+            ambience_profile
+        )
         if not route_pois:
             return jsonify({
                 "success": True,
                 "message": "沿最短路线未找到符合条件的高价值POI",
+                "route_style": route_style,
+                "ambience_profile": resolve_ambience_profile(poi_type, ambience_profile),
                 # 与前端约定的空结果字段结构
                 "path": shortest_route["route_points"],
                 "distance": shortest_route["total_distance"],
@@ -675,7 +892,7 @@ def plan_route():
             }), 200
 
         # 按 plan_time 筛选 POI 子集
-        filtered_pois = filter_poi_for_route(route_pois, plan_time, shortest_route["total_duration"])
+        filtered_pois = filter_poi_for_route(route_pois, plan_time, shortest_route["total_duration"], route_style)
 
         # 途经筛选后的 POI 重新规划路线
         new_route = generate_new_route(start, end, filtered_pois)
@@ -692,6 +909,8 @@ def plan_route():
         return jsonify({
             "success": True,
             "message": "路线规划成功",
+            "route_style": route_style,
+            "ambience_profile": resolve_ambience_profile(poi_type, ambience_profile),
             "path": route_points,
             "distance": total_distance,
             "duration": total_duration,
