@@ -1,5 +1,5 @@
-flask
-flask-cors
-requests
-numpy>=1.24.0
-scipy>=1.10.0
+flask>=2.3
+flask-cors>=4.0
+requests>=2.28
+openai>=1.0
+python-dotenv>=1.0
