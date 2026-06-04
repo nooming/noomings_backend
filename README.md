@@ -32,7 +32,7 @@ copy .env.example .env
 | `AMAP_STATIC_MAP_KEY` | 高德静态地图 Key（分享图，可与上相同） |
 | `AMAP_JS_KEY` | 前端地图 JS Key（填入后由首页注入，须配置域名白名单） |
 | `AMAP_JS_SECURITY_CODE` | 高德 JS API 安全密钥（与 JS Key 配套） |
-| `CORS_ORIGINS` | 生产环境跨域白名单，逗号分隔；本地可留空 |
+| `CORS_ORIGINS` | 生产跨域白名单（逗号分隔、无空格）。须含 `https://noomings.com` 与 `https://nooming.github.io` 等实际访问域；本地可留空 |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key（智能体功能） |
 | `PORT` | 后端端口，默认 `5000` |
 | `FLASK_DEBUG` | 本地调试可设为 `true`，生产请 `false` |
@@ -113,12 +113,12 @@ citywalk/
 | 生产 UI | https://nooming.github.io/app/citywalk/ |
 | API | https://noomings-backend.zeabur.app |
 
-仅部署 `backend/` 时无同级 `frontend/`，访问 `/` 返回 JSON 指引；请在 `CORS_ORIGINS` 中配置 Pages 域名。
+仅部署 `backend/` 时无同级 `frontend/`，访问 `/` 返回 JSON 指引；请在 `CORS_ORIGINS` 中配置前端域名（含自定义域 `noomings.com` 与 `nooming.github.io`）。
 
 **发布前检查：**
 
 1. 将本目录整包（`citywalk.py`、`agent/`、`lib/`、`planning/`、`api/`、`tests/` 等）同步到 **noomings_backend**；若对方仍为扁平布局，至少同步 `citywalk.py` 并带上 `lib/`、`planning/` 子包。
-2. Zeabur 环境变量按 `.env.example` 配置；`CORS_ORIGINS` 须包含 GitHub Pages 域名。
+2. Zeabur 环境变量按 `.env.example` 配置；`CORS_ORIGINS` 示例：`https://noomings.com,https://www.noomings.com,https://nooming.github.io,https://www.nooming.github.io`
 3. 仅部署 `backend/` 时无需上传 `frontend/`。
 
 仓库根保留 `frontend/` 时，本地 `python citywalk.py` 仍可在 `:5000` 提供完整静态页。
