@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
-from api.routes_plan import bp as bp_plan
-from api.routes_agent import bp as bp_agent
-from api.routes_media import bp as bp_media
+"""HTTP 路由统一注册。"""
+from flask import jsonify
 
 
-def register_blueprints(app):
-    app.register_blueprint(bp_plan)
-    app.register_blueprint(bp_agent)
-    app.register_blueprint(bp_media)
+def register_blueprints(app, sock=None):
+    from api.citywalk import register_citywalk_blueprints
+    from api.parking import register_parking_blueprints
+    from api.routes_config import bp as bp_config
+
+    register_citywalk_blueprints(app)
+    register_parking_blueprints(app, sock)
+    app.register_blueprint(bp_config, url_prefix="/api")
+
+    @app.route("/api/health")
+    def api_health():
+        return jsonify({"ok": True, "services": ["citywalk", "parking"]})
