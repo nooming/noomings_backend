@@ -33,13 +33,13 @@ copy .env.example .env
 |------|------|
 | `AMAP_KEY` | 高德 Web 服务 Key（路线规划、POI 等，**必填**） |
 | `AMAP_STATIC_MAP_KEY` | 高德静态地图 Key（分享图，可与上相同） |
-| `AMAP_JS_KEY` | 前端地图 JS Key（填入后由首页注入，须配置域名白名单） |
+| `AMAP_JS_KEY` | 前端地图 JS Key（填入后由配置 API 提供，须配置域名白名单） |
 | `AMAP_JS_SECURITY_CODE` | 高德 JS API 安全密钥（与 JS Key 配套） |
 | `CORS_ORIGINS` | 生产跨域白名单（逗号分隔、无空格）。须含 `https://noomings.com` 与 `https://nooming.github.io` 等实际访问域；本地可留空 |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key（智能体功能） |
 | `PORT` | 后端端口，默认 `5000` |
 | `FLASK_DEBUG` | 本地调试可设为 `true`，生产请 `false` |
-| `DATABASE_PATH` | Parking 方案库 SQLite，默认 `./data/parking_pso.db`；Zeabur 建议 `/data/parking_pso.db` + Volume |
+| `DATABASE_PATH` | Parking 方案库 SQLite，默认 `./parking/data/parking_pso.db`；Zeabur 建议 `/data/parking_pso.db` + Volume |
 
 灵感种草·联网选点（可选）：
 
@@ -58,33 +58,65 @@ cd noomings_backend
 python app.py
 ```
 
-浏览器访问：**http://localhost:5000/**（若 monorepo 存在同级 `frontend/` 则托管 Citywalk 静态页；否则 `/` 返回 JSON 指引）。
-
-独立静态前端调试时，用 `localhost` 打开 Pages 副本，API 自动指向 `http://localhost:5000`。
+浏览器访问：**http://localhost:5000/**（返回 JSON 服务指引）。独立静态前端用 `localhost` 打开 Pages 副本，API 自动指向 `http://localhost:5000`。
 
 ## 三、验证
 
 1. `GET /api/health` → `{"ok": true, "services": ["citywalk", "parking"]}`
 2. Citywalk：`POST /api/citywalk/plan`、`GET /api/citywalk/locate_city`
 3. Parking：`GET /api/parking/scenarios`、`POST /api/parking/optimize`
-4. 测试：`python -m pytest tests/ -q`
+4. 测试：`python -m pytest -q`
 
 ## 四、目录结构
 
+根目录仅两个产品域文件夹；CORS 与 `/api/health` 在 `app.py`，高德 Key 注入在 `citywalk/bootstrap.py`。
+
 ```
 noomings_backend/
-├── app.py               # Flask 入口
-├── api/
-│   ├── cors.py
-│   ├── routes_config.py
-│   ├── citywalk/
-│   └── parking/
-├── planning/ agent/ lib/
-├── parking/
-└── tests/
+├── app.py                      # Flask 入口、CORS、/api/health
+├── pytest.ini, requirements.txt, .env.example
+├── citywalk/                   # Citywalk 产品域
+│   ├── api/                    # /api/citywalk/* 与 /api/config/public
+│   ├── core/                   # planning/ agent/ geo/
+│   ├── bootstrap.py            # 高德 Key 启动注入
+│   └── tests/
+└── parking/                    # 停车方案设计器（parking-pso）
+    ├── api/                    # /api/parking/* 路由与 WebSocket
+    ├── core/                   # optimizer/ planner/ simulator/ storage/
+    ├── data/                   # parking_pso.db（本地默认路径）
+    └── tests/
 ```
 
-## 五、Zeabur 部署
+## 五、Citywalk 模块说明
+
+Citywalk 提供城市步行路线规划，支持直接规划与 LLM 智能体两条路径，共用同一套规划引擎。
+
+| 目录 | 职责 |
+|------|------|
+| `api/` | Flask 蓝图，HTTP 请求解析与响应封装 |
+| `core/planning/` | 路线引擎：POI 选点、路径计算、时间预算、循环路线 |
+| `core/agent/` | LLM 编排：意图解析、对话、种草、导览文案 |
+| `core/geo/` | 高德 Web API 客户端、地理编码、距离/城市工具 |
+
+- **直接规划**：`POST /api/citywalk/plan` → `execute_plan_request()`（`core/planning/plan_service.py`）
+- **智能体规划**：`/api/citywalk/agent/*` → `parse_plan_intent()` → 仍调用 `execute_plan_request()`
+- **外部依赖**：高德地图（`core/geo/`）、DeepSeek（`core/agent/llm_client.py`）、Tavily 可选（联网选点）
+
+## 六、Parking 模块说明
+
+`parking`（产品名 parking-pso）提供场景管理、PSO 优化、自动车位规划与模拟，支持异步任务与 WebSocket 进度推送。
+
+| 目录 | 职责 |
+|------|------|
+| `api/` | Flask 蓝图与 WebSocket 任务流 |
+| `core/optimizer/` | PSO 粒子群优化、路径代价、匈牙利分配 |
+| `core/planner/` | 自动车位/方案建议 |
+| `core/simulator/` | 场景运行模拟 |
+| `core/storage/` | SQLite 方案库与任务状态（默认 `parking/data/parking_pso.db`） |
+
+主要端点：`/api/parking/scenarios`（CRUD）、`/api/parking/optimize`（PSO）、`/api/parking/simulate` + WebSocket 进度流。Golden 测试见 `parking/tests/fixtures/default-scenario.json`。
+
+## 七、Zeabur 部署
 
 | 项 | 值 |
 |----|-----|
@@ -96,7 +128,7 @@ noomings_backend/
 
 `CORS_ORIGINS` 示例：`https://noomings.com,https://www.noomings.com,https://nooming.github.io,https://www.nooming.github.io`
 
-## 六、常见问题
+## 八、常见问题
 
 | 现象 | 处理 |
 |------|------|
