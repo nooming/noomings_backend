@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, request
 
 from citywalk.core.geo.amap_client import api_request_with_retry
 from citywalk.core.geo.geocoding import get_city_from_location
+from citywalk.core.geo.geo_utils import first_public_ip
 from citywalk.core.planning.runtime import AMAP_KEY, AMAP_STATIC_MAP_KEY
 
 bp = Blueprint("cw_media", __name__)
@@ -174,48 +175,59 @@ def locate_city():
                         "source": "browser_geolocation"
                     })
 
-        # 降级：使用高德IP定位API（服务器IP）
+        # 降级：用访客公网 IP 调高德 IP 定位（勿用服务器出口 IP）
+        visitor_ip = first_public_ip(
+            request.headers.get("X-Forwarded-For"),
+            request.headers.get("X-Real-IP"),
+            request.remote_addr,
+        )
         url = "https://restapi.amap.com/v3/ip"
-        params = {
-            "output": "json"
-        }
+        params = {"output": "json"}
+        if visitor_ip:
+            params["ip"] = visitor_ip
 
-        data = api_request_with_retry(url, params)
+        data = api_request_with_retry(url, params) if visitor_ip else None
 
         if data and data.get("city"):
-            city = data.get("city", "").replace("市", "")
-            province = data.get("province", "")
-            rectangle = data.get("rectangle", "")
+            raw_city = data.get("city") or ""
+            if isinstance(raw_city, list):
+                raw_city = (raw_city[0] if raw_city else "") or ""
+            city = str(raw_city).replace("市", "")
+            province = data.get("province") or ""
+            if isinstance(province, list):
+                province = (province[0] if province else "") or ""
+            rectangle = data.get("rectangle") or ""
+            if isinstance(rectangle, list):
+                rectangle = (rectangle[0] if rectangle else "") or ""
 
-            # 解析矩形区域获取中心点坐标
-            center_lng, center_lat = 116.4074, 39.9042
-            if rectangle:
-                try:
-                    coords = rectangle.split(";")
-                    if len(coords) == 2:
-                        lng1, lat1 = map(float, coords[0].split(","))
-                        lng2, lat2 = map(float, coords[1].split(","))
-                        center_lng = (lng1 + lng2) / 2
-                        center_lat = (lat1 + lat2) / 2
-                except (ValueError, AttributeError, IndexError) as e:
-                    logging.warning(f"解析IP定位矩形区域坐标失败：{e}")
+            if city:
+                center_lng, center_lat = 116.4074, 39.9042
+                if rectangle:
+                    try:
+                        coords = rectangle.split(";")
+                        if len(coords) == 2:
+                            lng1, lat1 = map(float, coords[0].split(","))
+                            lng2, lat2 = map(float, coords[1].split(","))
+                            center_lng = (lng1 + lng2) / 2
+                            center_lat = (lat1 + lat2) / 2
+                    except (ValueError, AttributeError, IndexError) as e:
+                        logging.warning(f"解析IP定位矩形区域坐标失败：{e}")
 
-            return jsonify({
-                "success": True,
-                "city": city,
-                "province": province,
-                "center": [center_lng, center_lat],
-                "source": "ip_location"
-            })
-        else:
-            # 返回默认城市（北京）
-            return jsonify({
-                "success": True,
-                "city": "北京",
-                "province": "北京市",
-                "center": [116.4074, 39.9042],
-                "source": "default"
-            })
+                return jsonify({
+                    "success": True,
+                    "city": city,
+                    "province": province,
+                    "center": [center_lng, center_lat],
+                    "source": "ip_location",
+                })
+
+        return jsonify({
+            "success": True,
+            "city": "北京",
+            "province": "北京市",
+            "center": [116.4074, 39.9042],
+            "source": "default",
+        })
 
     except Exception as e:
         logging.error(f"定位异常：{str(e)}")
@@ -224,6 +236,6 @@ def locate_city():
             "city": "北京",
             "province": "北京市",
             "center": [116.4074, 39.9042],
-            "source": "default"
+            "source": "default",
         })
 
