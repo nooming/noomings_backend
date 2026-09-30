@@ -3,9 +3,33 @@
 import logging
 from typing import Any, Dict, Optional, Tuple
 
-from citywalk.core.planning.constants import ROUTE_STYLE_CONFIG
+from citywalk.core.planning.constants import ROUTE_STYLE_CONFIG, normalize_visit_pace
 from citywalk.core.planning.plan_budget import MAX_PLAN_TIME_MIN, MIN_PLAN_TIME_MIN
 from citywalk.core.planning.poi_selection import normalize_poi_type
+
+# 时段规划提示（轻量 hint，不新增重模型）
+TIME_OF_DAY_HINTS = {
+    "now": "",
+    "afternoon": "午后时段，可偏咖啡馆与轻松逛点",
+    "evening": "傍晚时段，偏好夜景、灯光与咖啡馆",
+    "night": "夜晚时段，偏好夜景、灯光与咖啡馆",
+}
+
+
+def normalize_time_of_day(raw: Any) -> str:
+    t = (raw or "").strip().lower() if isinstance(raw, str) else ""
+    aliases = {
+        "现在": "now", "now": "now",
+        "午后": "afternoon", "afternoon": "afternoon",
+        "傍晚": "evening", "evening": "evening",
+        "夜晚": "night", "night": "night",
+    }
+    return aliases.get(t, "now")
+
+
+def time_of_day_query_clause(time_of_day: Any) -> str:
+    key = normalize_time_of_day(time_of_day)
+    return TIME_OF_DAY_HINTS.get(key, "")
 
 def _coords_pair_from_payload(raw: Any) -> Optional[Tuple[float, float]]:
     if isinstance(raw, list) and len(raw) == 2:
@@ -43,6 +67,7 @@ def _build_intent_from_map(payload: Dict[str, Any], default_city: str = "") -> D
     rs = (payload.get("route_style") or "balanced").strip()
     if rs not in ROUTE_STYLE_CONFIG:
         rs = "balanced"
+    visit_pace = normalize_visit_pace(payload.get("visit_pace"))
     end_text = end_label if mode != "loop" else start_label
     return {
         "status": "ready",
@@ -53,6 +78,7 @@ def _build_intent_from_map(payload: Dict[str, Any], default_city: str = "") -> D
         "plan_time": plan_time,
         "poi_type": poi,
         "route_style": rs,
+        "visit_pace": visit_pace,
         "_plan_mode": mode,
     }
 
@@ -76,15 +102,21 @@ def _resolve_agent_intent(
             "message": "请描述您的 Citywalk 需求，或在地图上选好起终点。",
         }
 
+    # 时段 hint 并入解析文本，便于 LLM / 关键词推断；不阻塞规划
+    tod_clause = time_of_day_query_clause(payload.get("time_of_day"))
+    parse_query = query
+    if query and tod_clause and tod_clause not in query:
+        parse_query = f"{query}（{tod_clause}）"
+
     intent: Optional[Dict[str, Any]] = None
-    if query:
+    if parse_query:
         intent = parse_plan_intent(
-            query, default_city=default_city, plan_time_override=plan_override,
+            parse_query, default_city=default_city, plan_time_override=plan_override,
         )
         if intent.get("status") == "error":
             return intent
 
-    if map_ready and (not query or intent.get("status") == "clarify"):
+    if map_ready and (not parse_query or (intent and intent.get("status") == "clarify")):
         intent = _build_intent_from_map(payload, default_city)
         logging.info("智能规划：地图起终点兜底（query=%r map_ready=True）", query[:80] if query else "")
 
@@ -111,17 +143,34 @@ def _merge_payload_into_intent(intent: Dict[str, Any], payload: Dict[str, Any]) 
     if city:
         intent["city"] = city
 
+    # 偏好芯片：用户显式选择时优先生效；默认「无偏好」不覆盖 LLM 从描述解析的类型
     poi = (payload.get("poi_type") or "").strip()
+    poi_locked = bool(payload.get("poi_type_locked"))
     if poi:
-        intent["poi_type"] = normalize_poi_type(poi)
+        if poi_locked or poi != "无偏好":
+            intent["poi_type"] = normalize_poi_type(poi)
+            intent["ambience_profile"] = intent["poi_type"]
 
     rs = (payload.get("route_style") or "").strip()
     if rs in ROUTE_STYLE_CONFIG:
         intent["route_style"] = rs
 
+    if payload.get("visit_pace") is not None and str(payload.get("visit_pace")).strip() != "":
+        intent["visit_pace"] = normalize_visit_pace(payload.get("visit_pace"))
+
     mode = (payload.get("mode") or "").strip().lower()
     if mode in ("route", "loop"):
         intent["_plan_mode"] = mode
+
+    # 傍晚/夜晚且仍无偏好时，轻量偏置（用户显式锁定「无偏好」时不改写）
+    tod = normalize_time_of_day(payload.get("time_of_day"))
+    if (
+        tod in ("evening", "night")
+        and (intent.get("poi_type") or "无偏好") == "无偏好"
+        and not (poi_locked and poi == "无偏好")
+    ):
+        intent["poi_type"] = "咖啡甜品"
+        intent["ambience_profile"] = "咖啡甜品"
 
     start_xy = _coords_pair_from_payload(payload.get("start"))
     end_xy = _coords_pair_from_payload(payload.get("end"))

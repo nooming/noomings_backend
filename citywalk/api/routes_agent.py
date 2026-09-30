@@ -227,10 +227,12 @@ def agent_inspire():
         from citywalk.core.agent.inspiration import analyze_intent_themes, suggest_spots
 
         analysis = analyze_intent_themes(query, city)
-        spots = suggest_spots(
+        inspired = suggest_spots(
             city, analysis.get("area", ""),
             analysis.get("themes"), analysis.get("keywords"), count=8,
         )
+        spots = inspired.get("spots") or []
+        source = inspired.get("source") or "llm"
 
         # 并发地理编码各候选点（executor.map 保序），解析失败者丢弃。
         # 串行 N 次高德调用既慢又增 CUQPS 风险，与仓内其它 fan-out 用法一致。
@@ -254,6 +256,7 @@ def agent_inspire():
             "themes": analysis.get("themes", []),
             "keywords": analysis.get("keywords", []),
             "area": analysis.get("area", ""),
+            "source": source if source in ("web", "llm") else "llm",
             "spots": out,
         })
     except Exception:
@@ -375,10 +378,11 @@ def agent_plan_inspired():
         else:
             inspire_query = query or "沿地图所选起终点漫步，无特别偏好"
             analysis = analyze_intent_themes(inspire_query, city)
-            spots = suggest_spots(
+            inspired = suggest_spots(
                 city, analysis.get("area", ""),
                 analysis.get("themes"), analysis.get("keywords"), count=6,
             )
+            spots = inspired.get("spots") or []
         if spots:
             plan_data["seed_pois"] = spots  # 带坐标则直接用，仅名称则 execute_plan_request 内部地理编码
 

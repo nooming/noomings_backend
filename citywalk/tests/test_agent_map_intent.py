@@ -58,5 +58,59 @@ class TestAgentMapIntent(unittest.TestCase):
         intent = citywalk._resolve_agent_intent("", "", {})
         self.assertEqual(intent["status"], "clarify")
 
+    def test_merge_poi_default_does_not_override_llm(self):
+        intent = {
+            "status": "ready",
+            "poi_type": "咖啡甜品",
+            "route_style": "balanced",
+            "plan_time": 90,
+            "city": "上海",
+            "start": "A",
+            "end": "B",
+            "visit_pace": "checkin",
+        }
+        out = citywalk._merge_payload_into_intent(intent, {
+            "poi_type": "无偏好",
+            "visit_pace": "relaxed",
+        })
+        self.assertEqual(out["poi_type"], "咖啡甜品")
+        self.assertEqual(out["visit_pace"], "relaxed")
+
+    def test_merge_poi_explicit_wins(self):
+        intent = {
+            "status": "ready",
+            "poi_type": "咖啡甜品",
+            "route_style": "balanced",
+            "plan_time": 90,
+            "city": "上海",
+            "start": "A",
+            "end": "B",
+        }
+        out = citywalk._merge_payload_into_intent(intent, {
+            "poi_type": "历史",
+            "poi_type_locked": True,
+        })
+        self.assertEqual(out["poi_type"], "历史")
+
+    def test_merge_explicit_none_preference_locked(self):
+        intent = {
+            "status": "ready",
+            "poi_type": "咖啡甜品",
+            "route_style": "balanced",
+            "plan_time": 60,
+            "city": "上海",
+            "start": "A",
+            "end": "B",
+        }
+        out = citywalk._merge_payload_into_intent(intent, {
+            "poi_type": "无偏好",
+            "poi_type_locked": True,
+        })
+        self.assertEqual(out["poi_type"], "无偏好")
+
+    def test_time_of_day_normalize(self):
+        self.assertEqual(citywalk.normalize_time_of_day("傍晚"), "evening")
+        self.assertIn("夜景", citywalk.time_of_day_query_clause("夜晚"))
+
 if __name__ == "__main__":
     unittest.main()

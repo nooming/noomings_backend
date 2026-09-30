@@ -45,9 +45,9 @@ copy .env.example .env
 
 | 变量 | 说明 |
 |------|------|
-| `CW_INSPIRATION_PROVIDER` | 选点来源：默认 `llm`；设为 `web_search` 启用联网搜索 |
-| `CW_SEARCH_PROVIDER` | 搜索后端，默认 `tavily` |
-| `TAVILY_API_KEY` | Tavily 搜索 Key；留空时自动回退 LLM 选点 |
+| `CW_INSPIRATION_PROVIDER` | 选点来源：默认 `llm`；设为 `web_search` 启用公开网页搜索 |
+| `CW_SEARCH_PROVIDER` | 搜索后端，默认 `bocha`（博查，国内搜索提供方） |
+| `BOCHA_API_KEY` | 博查搜索 Key；留空时自动回退 LLM 选点 |
 
 > 勿将 `.env` 提交到 Git。
 
@@ -100,7 +100,7 @@ Citywalk 提供城市步行路线规划，支持直接规划与 LLM 智能体两
 
 - **直接规划**：`POST /api/citywalk/plan` → `execute_plan_request()`（`core/planning/plan_service.py`）
 - **智能体规划**：`/api/citywalk/agent/*` → `parse_plan_intent()` → 仍调用 `execute_plan_request()`
-- **外部依赖**：高德地图（`core/geo/`）、DeepSeek（`core/agent/llm_client.py`）、Tavily 可选（联网选点）
+- **外部依赖**：高德地图（`core/geo/`）、DeepSeek（`core/agent/llm_client.py`）、博查可选（公开网页选点）
 
 ## 六、Parking 模块说明
 

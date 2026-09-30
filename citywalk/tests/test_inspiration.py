@@ -7,11 +7,64 @@ from citywalk.core.agent import inspiration, search_provider
 
 class TestSearchProvider(unittest.TestCase):
     def test_not_configured_without_key(self):
-        with mock.patch.dict("os.environ", {"CW_SEARCH_PROVIDER": "tavily", "TAVILY_API_KEY": ""}, clear=False):
+        with mock.patch.dict("os.environ", {"CW_SEARCH_PROVIDER": "bocha", "BOCHA_API_KEY": ""}, clear=False):
             self.assertFalse(search_provider.is_search_configured())
 
+    def test_configured_with_bocha_key(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"CW_SEARCH_PROVIDER": "bocha", "BOCHA_API_KEY": "test-key"},
+            clear=False,
+        ):
+            self.assertTrue(search_provider.is_search_configured())
+
     def test_web_search_empty_when_unconfigured(self):
-        with mock.patch.dict("os.environ", {"TAVILY_API_KEY": ""}, clear=False):
+        with mock.patch.dict("os.environ", {"CW_SEARCH_PROVIDER": "bocha", "BOCHA_API_KEY": ""}, clear=False):
+            self.assertEqual(search_provider.web_search("上海 咖啡"), [])
+
+    def test_bocha_maps_mocked_response(self):
+        fake_resp = mock.Mock()
+        fake_resp.ok = True
+        fake_resp.json.return_value = {
+            "code": 200,
+            "data": {
+                "webPages": {
+                    "value": [
+                        {
+                            "name": "上海小众咖啡馆",
+                            "url": "https://example.com/cafe",
+                            "snippet": "短摘要",
+                            "summary": "较长摘要内容",
+                        }
+                    ]
+                }
+            },
+        }
+        with mock.patch.dict(
+            "os.environ",
+            {"CW_SEARCH_PROVIDER": "bocha", "BOCHA_API_KEY": "test-key"},
+            clear=False,
+        ), mock.patch("citywalk.core.agent.search_provider.requests.post", return_value=fake_resp) as m_post:
+            out = search_provider.web_search("上海 咖啡", max_results=3)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["title"], "上海小众咖啡馆")
+        self.assertEqual(out[0]["url"], "https://example.com/cafe")
+        self.assertEqual(out[0]["content"], "较长摘要内容")
+        kwargs = m_post.call_args.kwargs
+        self.assertEqual(kwargs["json"]["count"], 3)
+        self.assertTrue(kwargs["json"]["summary"])
+        self.assertIn("Bearer ", kwargs["headers"]["Authorization"])
+        self.assertNotIn("test-key", str(out))
+
+    def test_bocha_http_error_returns_empty(self):
+        fake_resp = mock.Mock()
+        fake_resp.ok = False
+        fake_resp.status_code = 401
+        with mock.patch.dict(
+            "os.environ",
+            {"CW_SEARCH_PROVIDER": "bocha", "BOCHA_API_KEY": "test-key"},
+            clear=False,
+        ), mock.patch("citywalk.core.agent.search_provider.requests.post", return_value=fake_resp):
             self.assertEqual(search_provider.web_search("上海 咖啡"), [])
 
 class TestDedupeSpots(unittest.TestCase):
@@ -42,7 +95,8 @@ class TestWebSuggestSpots(unittest.TestCase):
              mock.patch("citywalk.core.agent.search_provider.web_search", return_value=fake_results), \
              mock.patch.object(inspiration, "chat_json", return_value=fake_llm) as m_llm:
             out = inspiration._web_suggest_spots("上海", "", ["出片"], ["咖啡"], 6)
-        self.assertEqual([s["name"] for s in out], ["XX 咖啡馆"])
+        self.assertEqual(out["source"], "web")
+        self.assertEqual([s["name"] for s in out["spots"]], ["XX 咖啡馆"])
         self.assertTrue(m_llm.called)
 
     def test_falls_back_to_llm_when_search_unconfigured(self):
@@ -50,14 +104,17 @@ class TestWebSuggestSpots(unittest.TestCase):
              mock.patch("citywalk.core.agent.search_provider.is_search_configured", return_value=False), \
              mock.patch.object(inspiration, "_llm_suggest_spots", return_value=[{"name": "FB"}]) as m_fb:
             out = inspiration._web_suggest_spots("上海", "", [], [], 6)
-        self.assertEqual(out, [{"name": "FB"}])
+        self.assertEqual(out, {"spots": [{"name": "FB"}], "source": "llm"})
         self.assertTrue(m_fb.called)
 
     def test_suggest_spots_dispatches_to_web(self):
         with mock.patch.dict("os.environ", {"CW_INSPIRATION_PROVIDER": "web_search"}, clear=False), \
-             mock.patch.object(inspiration, "_web_suggest_spots", return_value=[{"name": "W"}]) as m_web:
+             mock.patch.object(
+                 inspiration, "_web_suggest_spots",
+                 return_value={"spots": [{"name": "W"}], "source": "web"},
+             ) as m_web:
             out = inspiration.suggest_spots("上海", "", ["出片"], ["咖啡"], 6)
-        self.assertEqual(out, [{"name": "W"}])
+        self.assertEqual(out, {"spots": [{"name": "W"}], "source": "web"})
         self.assertTrue(m_web.called)
 
 class TestCleanSelectedSpots(unittest.TestCase):

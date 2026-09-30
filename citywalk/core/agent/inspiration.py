@@ -73,27 +73,31 @@ def suggest_spots(
     themes: List[str] = None,
     keywords: List[str] = None,
     count: int = 8,
-) -> List[Dict[str, str]]:
-    """③ 主题/关键词 → 真实候选地点（经由可插拔 Provider）。"""
+) -> Dict[str, Any]:
+    """③ 主题/关键词 → 真实候选地点。
+
+    返回 ``{"spots": [...], "source": "web"|"llm"}``。
+    ``source=web`` 表示成功用公开网页搜索 grounding；否则为 LLM 估计。
+    """
     provider = os.environ.get("CW_INSPIRATION_PROVIDER", "llm").strip().lower()
     themes = themes or []
     keywords = keywords or []
-    if provider in ("web_search", "tavily", "web"):
+    if provider in ("web_search", "web", "bocha"):
         # 联网搜索 grounding；无 key / 无结果时内部回退到 LLM 选点。
         return _web_suggest_spots(city, area, themes, keywords, count)
     if provider not in ("llm",):
         logger.info("未知灵感 Provider=%s，回退 llm", provider)
-    return _llm_suggest_spots(city, area, themes, keywords, count)
+    return {"spots": _llm_suggest_spots(city, area, themes, keywords, count), "source": "llm"}
 
 
 def _web_suggest_spots(
     city: str, area: str, themes: List[str], keywords: List[str], count: int
-) -> List[Dict[str, str]]:
+) -> Dict[str, Any]:
     """联网搜索 + LLM 抽取：先搜真实结果，再让 LLM 只从结果里提取地点名。"""
     from citywalk.core.agent.search_provider import is_search_configured, web_search
 
     if not city or not is_configured() or not is_search_configured():
-        return _llm_suggest_spots(city, area, themes, keywords, count)
+        return {"spots": _llm_suggest_spots(city, area, themes, keywords, count), "source": "llm"}
 
     count = max(1, min(12, int(count or 8)))
     # 由 城市+片区+关键词 拼若干搜索 query；关键词缺省时退回主题。
@@ -117,7 +121,7 @@ def _web_suggest_spots(
 
     if not snippets:
         # 联网无结果（无 key / 配额 / 网络）→ 回退纯 LLM 选点
-        return _llm_suggest_spots(city, area, themes, keywords, count)
+        return {"spots": _llm_suggest_spots(city, area, themes, keywords, count), "source": "llm"}
 
     user = (
         f"城市：{city}\n片区：{area or '不限'}\n"
@@ -129,8 +133,8 @@ def _web_suggest_spots(
         raw = chat_json(_WEB_SPOTS_SYSTEM, user, temperature=0.4)
     except Exception as e:
         logger.warning("联网选点抽取失败: %s", e)
-        return _llm_suggest_spots(city, area, themes, keywords, count)
-    return _dedupe_spots(raw.get("spots"), count)
+        return {"spots": _llm_suggest_spots(city, area, themes, keywords, count), "source": "llm"}
+    return {"spots": _dedupe_spots(raw.get("spots"), count), "source": "web"}
 
 
 def _llm_suggest_spots(
