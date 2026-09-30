@@ -10,6 +10,7 @@ from citywalk.core.planning.poi_selection import normalize_poi_type
 # 时段规划提示（轻量 hint，不新增重模型）
 TIME_OF_DAY_HINTS = {
     "now": "",
+    "morning": "上午时段，可偏公园、早餐与轻松逛点",
     "afternoon": "午后时段，可偏咖啡馆与轻松逛点",
     "evening": "傍晚时段，偏好夜景、灯光与咖啡馆",
     "night": "夜晚时段，偏好夜景、灯光与咖啡馆",
@@ -20,6 +21,7 @@ def normalize_time_of_day(raw: Any) -> str:
     t = (raw or "").strip().lower() if isinstance(raw, str) else ""
     aliases = {
         "现在": "now", "now": "now",
+        "上午": "morning", "morning": "morning",
         "午后": "afternoon", "afternoon": "afternoon",
         "傍晚": "evening", "evening": "evening",
         "夜晚": "night", "night": "night",
@@ -162,15 +164,18 @@ def _merge_payload_into_intent(intent: Dict[str, Any], payload: Dict[str, Any]) 
     if mode in ("route", "loop"):
         intent["_plan_mode"] = mode
 
-    # 傍晚/夜晚且仍无偏好时，轻量偏置（用户显式锁定「无偏好」时不改写）
+    # 时段且仍无偏好时，轻量偏置（用户显式锁定「无偏好」时不改写）
     tod = normalize_time_of_day(payload.get("time_of_day"))
     if (
-        tod in ("evening", "night")
-        and (intent.get("poi_type") or "无偏好") == "无偏好"
+        (intent.get("poi_type") or "无偏好") == "无偏好"
         and not (poi_locked and poi == "无偏好")
     ):
-        intent["poi_type"] = "咖啡甜品"
-        intent["ambience_profile"] = "咖啡甜品"
+        if tod in ("evening", "night"):
+            intent["poi_type"] = "咖啡甜品"
+            intent["ambience_profile"] = "咖啡甜品"
+        elif tod == "morning":
+            intent["poi_type"] = "自然"
+            intent["ambience_profile"] = "自然"
 
     start_xy = _coords_pair_from_payload(payload.get("start"))
     end_xy = _coords_pair_from_payload(payload.get("end"))

@@ -111,6 +111,9 @@ class TestAgentMapIntent(unittest.TestCase):
     def test_time_of_day_normalize(self):
         self.assertEqual(citywalk.normalize_time_of_day("傍晚"), "evening")
         self.assertIn("夜景", citywalk.time_of_day_query_clause("夜晚"))
+        self.assertEqual(citywalk.normalize_time_of_day("上午"), "morning")
+        morning_clause = citywalk.time_of_day_query_clause("上午")
+        self.assertTrue("公园" in morning_clause or "早餐" in morning_clause)
 
 if __name__ == "__main__":
     unittest.main()
