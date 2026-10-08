@@ -28,7 +28,8 @@ def build_user_route_tip(
         optional_poi_count: int = 0,
         plan_time_min: int = 0,
         activity_total_min: int = 0,
-        free_time_min: int = 0) -> str:
+        free_time_min: int = 0,
+        seeds_exceed_plan: bool = False) -> str:
     """生成面向用户的路线说明，不含算法/性能内部表述。"""
     parts: List[str] = []
 
@@ -55,6 +56,9 @@ def build_user_route_tip(
             parts.append("已按「省力直达」优化顺序。")
         else:
             parts.append("已均衡串联沿途打卡。")
+
+    if seeds_exceed_plan:
+        parts.append("已保留你指定的站点，预计会超过计划时长。")
 
     if stay_hint:
         parts.append(stay_hint.strip())

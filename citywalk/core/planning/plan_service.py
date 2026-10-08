@@ -27,6 +27,7 @@ from citywalk.core.planning.poi_selection import (
     is_detour_mode,
     is_poi_in_target_city,
     mark_optional_pois,
+    refine_stops_after_walk,
     resolve_ambience_profile,
     trim_backtrack_pois_toward_end,
     try_fill_pois_for_plan_time,
@@ -78,6 +79,30 @@ def _plan_time_response_fields(
     }
 
 
+def _excluded_poi_names(data: Dict[str, Any]) -> set:
+    """用户在结果页删掉的站名，补点时不得再写回。"""
+    raw = data.get("excluded_poi_names") or []
+    names = set()
+    if not isinstance(raw, list):
+        return names
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            names.add(item.strip())
+    return names
+
+
+def _drop_excluded_pois(pois: List[Dict], excluded: set) -> List[Dict]:
+    if not excluded:
+        return pois
+    return [p for p in pois if (p.get("name") or "").strip() not in excluded]
+
+
+def _seeds_exceed_plan(plan_time: int, activity_min: int, pois: List[Dict]) -> bool:
+    if plan_time <= 0 or activity_min <= plan_time or not pois:
+        return False
+    return all(p.get("is_seed") for p in pois)
+
+
 def _walking_route_fail_message(amap_info: str) -> str:
     """步行最短路失败时返回用户可读文案，透传高德 info。"""
     info = (amap_info or "").strip()
@@ -102,7 +127,8 @@ def build_seed_pois(seed_specs: List[Any],
     """
     seeds: List[Dict] = []
     seen = set()
-    for spec in (seed_specs or [])[:8]:
+    # 结果页可把整条站点列表当作种子重规划，上限高于规划前的 3 个必去
+    for spec in (seed_specs or [])[:24]:
         if isinstance(spec, str):
             name, reason, category, area = spec.strip(), "", "", ""
             lng = lat = None
@@ -259,6 +285,26 @@ def _execute_loop_plan_request(
         is_poi_in_target_city,
     )
 
+    excluded_names = _excluded_poi_names(data)
+    seed_specs = data.get("seed_pois")
+    if seed_specs:
+        try:
+            seeds = build_seed_pois(
+                seed_specs,
+                [center, center],
+                ambience_profile=ambience_profile,
+                route_style="balanced",
+                city=city_for_geocode,
+            )
+            if seeds:
+                existing = {p.get("name") for p in route_pois}
+                seeds = [s for s in seeds if s["name"] not in existing]
+                route_pois = seeds + route_pois
+                meta["seed_poi_count"] = len(seeds)
+        except Exception as e:
+            logging.warning("探索模式种子点注入失败，忽略：%s", e)
+    route_pois = _drop_excluded_pois(route_pois, excluded_names)
+
     if not route_pois:
         return ({
             "success": True,
@@ -287,12 +333,34 @@ def _execute_loop_plan_request(
         detour_mode=False,
         visit_pace=visit_pace,
     )
+    max_poi_count = compute_max_poi_count(plan_time, walk_time_est, visit_pace)
+    filtered_pois = _ensure_seed_pois_retained(
+        filtered_pois, route_pois, max_poi_count, None,
+    )
 
     meta["plan_stage"] = "build_route"
     loop_route = generate_loop_route(center, filtered_pois)
     total_distance = loop_route["new_total_distance"]
     total_duration = loop_route["new_total_duration"]
     route_points = loop_route["new_route_points"]
+
+    visit_order = sorted(filtered_pois, key=lambda p: float(p.get("angle") or 0))
+    refined, changed = refine_stops_after_walk(
+        visit_order,
+        route_points if route_points and len(route_points) >= 2 else None,
+        total_duration,
+        plan_time,
+        route_style="balanced",
+        visit_pace=visit_pace,
+        poi_type=poi_type,
+        ambience_profile=ambience_profile,
+    )
+    if changed:
+        filtered_pois = refined
+        loop_route = generate_loop_route(center, filtered_pois)
+        total_distance = loop_route["new_total_distance"]
+        total_duration = loop_route["new_total_duration"]
+        route_points = loop_route["new_route_points"]
 
     stay_hint = ""
     if filtered_pois:
@@ -319,6 +387,9 @@ def _execute_loop_plan_request(
         plan_time_min=plan_time,
         activity_total_min=time_fields["activity_total_min"],
         free_time_min=time_fields["free_time_min"],
+        seeds_exceed_plan=_seeds_exceed_plan(
+            plan_time, time_fields["activity_total_min"], filtered_pois,
+        ),
     )
 
     meta["plan_stage"] = "complete"
@@ -508,6 +579,9 @@ def execute_plan_request(data: Dict[str, Any]) -> Tuple[dict, int, dict]:
             except Exception as e:
                 logging.warning("种子点注入失败，忽略：%s", e)
 
+        excluded_names = _excluded_poi_names(data)
+        route_pois = _drop_excluded_pois(route_pois, excluded_names)
+
         if not route_pois:
             return ({
                 "success": True,
@@ -580,6 +654,7 @@ def execute_plan_request(data: Dict[str, Any]) -> Tuple[dict, int, dict]:
             shortest_walk_min=shortest_walk_min,
             visit_pace=visit_pace,
             distance_m=distance_est_m,
+            excluded_names=excluded_names,
         )
         if end and filtered_pois:
             filtered_pois = trim_backtrack_pois_toward_end(
@@ -614,6 +689,37 @@ def execute_plan_request(data: Dict[str, Any]) -> Tuple[dict, int, dict]:
         route_points = new_route["new_route_points"] if new_route_valid else shortest_route["route_points"]
         total_distance = new_route["new_total_distance"] if new_route_valid else shortest_route["total_distance"]
         total_duration = new_route["new_total_duration"] if new_route_valid else shortest_route["total_duration"]
+
+        # 第一条真实步行线之后：按折线去掉折返，再按计划时长减非种子站，然后最多再走一次步行接口。
+        fit_walk_min = total_duration if new_route_valid else shortest_walk_min
+        fit_points = route_points if new_route_valid else None
+        refined_pois, stops_changed = refine_stops_after_walk(
+            filtered_pois,
+            fit_points,
+            fit_walk_min,
+            plan_time,
+            route_style=route_style,
+            visit_pace=visit_pace,
+            poi_type=poi_type,
+            ambience_profile=resolve_ambience_profile(poi_type, ambience_profile),
+        )
+        if stops_changed:
+            filtered_pois = refined_pois
+            try:
+                new_route = generate_new_route(
+                    start, end, filtered_pois, route_points=base_route_points,
+                    plan_time=plan_time, visit_pace=visit_pace,
+                )
+            except AmapQuotaError:
+                raise
+            new_route_valid = (new_route.get("new_route_points") and
+                              len(new_route.get("new_route_points", [])) > 0 and
+                              new_route.get("new_total_distance", 0) > 0)
+            route_points = new_route["new_route_points"] if new_route_valid else shortest_route["route_points"]
+            total_distance = new_route["new_total_distance"] if new_route_valid else shortest_route["total_distance"]
+            total_duration = new_route["new_total_duration"] if new_route_valid else shortest_route["total_duration"]
+        else:
+            filtered_pois = refined_pois
 
         stay_hint = ""
         if filtered_pois:
@@ -650,6 +756,9 @@ def execute_plan_request(data: Dict[str, Any]) -> Tuple[dict, int, dict]:
             plan_time_min=plan_time,
             activity_total_min=time_fields["activity_total_min"],
             free_time_min=time_fields["free_time_min"],
+            seeds_exceed_plan=_seeds_exceed_plan(
+                plan_time, time_fields["activity_total_min"], filtered_pois,
+            ),
         )
 
         meta["plan_stage"] = "complete"

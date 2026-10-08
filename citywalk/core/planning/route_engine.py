@@ -488,7 +488,25 @@ def _ensure_seed_pois_retained(
     if route_points and len(route_points) >= 2:
         _attach_route_progress(result, route_points)
         result = _order_pois_along_route(result)
-    return result[:max_poi_count]
+    return _cap_pois_keeping_seeds(result, max_poi_count)
+
+
+def _cap_pois_keeping_seeds(pois: List[Dict], max_poi_count: int) -> List[Dict]:
+    """压到名额内时只减非种子；必去与用户加站全部保留。"""
+    if not pois:
+        return pois
+    seeds = [p for p in pois if p.get("is_seed")]
+    if max_poi_count <= 0 or len(seeds) >= max_poi_count:
+        return seeds
+    overflow = len(pois) - max_poi_count
+    if overflow <= 0:
+        return pois
+    ranked = sorted(
+        (p for p in pois if not p.get("is_seed")),
+        key=lambda p: float(p.get("final_score") or 0),
+    )
+    drop_ids = {id(p) for p in ranked[:overflow]}
+    return [p for p in pois if id(p) not in drop_ids]
 
 
 def generate_new_route(start: Tuple[float, float], end: Tuple[float, float],

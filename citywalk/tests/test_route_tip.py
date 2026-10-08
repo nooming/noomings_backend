@@ -39,6 +39,17 @@ class TestRouteTipCopy(unittest.TestCase):
         )
         self.assertNotIn("比计划", tip)
 
+    def test_seeds_exceed_plan_copy(self):
+        tip = build_user_route_tip(
+            mode="route",
+            poi_count=2,
+            end_address="外滩",
+            plan_time_min=60,
+            activity_total_min=100,
+            seeds_exceed_plan=True,
+        )
+        self.assertIn("已保留你指定的站点，预计会超过计划时长", tip)
+
     def test_degraded_copy(self):
         tip = build_user_route_tip(
             mode="route",

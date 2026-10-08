@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """POI 筛选、评分、停留时长与折返修剪。"""
 import logging
+import math
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from citywalk.core.geo.geo_utils import haversine, normalize_city_name
 from citywalk.core.planning.constants import *
@@ -364,16 +365,12 @@ def allocate_poi_stay_times(
             )
         return pois, hint, free_m
 
-    max_stay = _poi_max_stay_min(poi_type, ambience_profile)
-    profile_max = max_stay
-    per_poi_cap = min(POI_STAY_ABS_MAX_M, max(profile_max, stay_budget // max(n, 1)))
-    if n <= 4 and stay_budget > n * profile_max:
-        per_poi_cap = min(POI_STAY_ABS_MAX_M, stay_budget // n)
-
-    if stay_budget >= n * per_poi_cap:
+    # 慢慢逛：停留从 5 分钟抬到画像上限（25，历史 30），不再抬到 45。
+    cap = _poi_max_stay_min(poi_type, ambience_profile)
+    if stay_budget >= n * cap:
         for p in pois:
-            p["stay_time"] = per_poi_cap
-        shortfall = stay_budget - n * per_poi_cap
+            p["stay_time"] = cap
+        shortfall = stay_budget - n * cap
         if shortfall > 10:
             hint = "各站停留已按行程估算；若仍觉得偏短，可在店内多留一会儿。"
         _, free_m = compute_activity_and_free_min(
@@ -385,7 +382,7 @@ def allocate_poi_stay_times(
     remainder = stay_budget % n
     for i, p in enumerate(pois):
         stay = base + (1 if i < remainder else 0)
-        p["stay_time"] = max(POI_STAY_MIN_M, min(per_poi_cap, stay))
+        p["stay_time"] = max(POI_STAY_MIN_M, min(cap, stay))
     _, free_m = compute_activity_and_free_min(
         walk_duration_min, pois, plan_time,
     )
@@ -474,7 +471,7 @@ def ensure_last_poi_near_end(
         )
         return ordered
 
-    if len(ordered) > min_keep:
+    if len(ordered) > min_keep and not ordered[-1].get("is_seed"):
         removed = ordered.pop()
         logging.info(
             "尾站距终点 %dm，移除末站「%s」",
@@ -536,6 +533,7 @@ def try_fill_pois_for_plan_time(
         shortest_walk_min: int = 0,
         visit_pace: str = "checkin",
         distance_m: Optional[float] = None,
+        excluded_names: Optional[Set[str]] = None,
 ) -> List[Dict]:
     """时长不足时按氛围候选补点；未达最少节点前不因估时达标停止。"""
     if not all_candidates or max_poi_count <= 0:
@@ -549,8 +547,12 @@ def try_fill_pois_for_plan_time(
     if not detour_mode:
         toward_end_slack_m *= FILL_POI_TOWARD_END_MULTIPLIER
 
+    blocked = {n.strip() for n in (excluded_names or set()) if n and str(n).strip()}
     selected_names = {p.get("name") for p in filtered_pois}
-    pool = [p for p in all_candidates if p.get("name") not in selected_names]
+    pool = [
+        p for p in all_candidates
+        if p.get("name") not in selected_names and (p.get("name") or "").strip() not in blocked
+    ]
     if not pool:
         return filtered_pois
 
@@ -681,6 +683,192 @@ def trim_backtrack_pois_toward_end(
             f"朝终点修剪打卡点：{before} -> {after}（slack={int(toward_slack)}m relaxed={relaxed}）"
         )
     return kept if kept else [ordered[0]]
+
+
+# 真实步行线与已走过的线重合到这个距离内，才算折返（米）
+_WALK_RETRACE_NEAR_M = 28.0
+
+
+def _lng_lat(pt) -> Tuple[float, float]:
+    return float(pt[0]), float(pt[1])
+
+
+def _point_segment_dist_m(
+        lng: float, lat: float,
+        ax: float, ay: float, bx: float, by: float,
+) -> float:
+    """点到线段的近似米距（局部等距投影）。"""
+    lat0 = (lat + ay + by) / 3.0
+    mx = 111320.0 * math.cos(math.radians(lat0))
+    my = 111320.0
+    px, py = lng * mx, lat * my
+    axm, aym = ax * mx, ay * my
+    bxm, bym = bx * mx, by * my
+    dx, dy = bxm - axm, bym - aym
+    denom = dx * dx + dy * dy
+    if denom < 1e-6:
+        return haversine(lng, lat, ax, ay)
+    t = max(0.0, min(1.0, ((px - axm) * dx + (py - aym) * dy) / denom))
+    qx, qy = axm + t * dx, aym + t * dy
+    return math.hypot(px - qx, py - qy)
+
+
+def _dist_to_polyline_m(lng: float, lat: float, poly: List) -> float:
+    if not poly:
+        return float("inf")
+    if len(poly) == 1:
+        x, y = _lng_lat(poly[0])
+        return haversine(lng, lat, x, y)
+    best = float("inf")
+    for i in range(len(poly) - 1):
+        ax, ay = _lng_lat(poly[i])
+        bx, by = _lng_lat(poly[i + 1])
+        d = _point_segment_dist_m(lng, lat, ax, ay, bx, by)
+        if d < best:
+            best = d
+    return best
+
+
+def _overlap_with_prior_m(segment: List, prior: List) -> float:
+    """segment 里贴着 prior 走的长度（米）。"""
+    if len(segment) < 2 or len(prior) < 2:
+        return 0.0
+    total = 0.0
+    for i in range(len(segment) - 1):
+        ax, ay = _lng_lat(segment[i])
+        bx, by = _lng_lat(segment[i + 1])
+        seg_len = haversine(ax, ay, bx, by)
+        if seg_len < 0.5:
+            continue
+        samples = (
+            (ax, ay),
+            ((ax + bx) / 2.0, (ay + by) / 2.0),
+            (bx, by),
+        )
+        close = 0
+        for lng, lat in samples:
+            if _dist_to_polyline_m(lng, lat, prior) <= _WALK_RETRACE_NEAR_M:
+                close += 1
+        total += seg_len * (close / 3.0)
+    return total
+
+
+def _visit_indices_on_walk(pois: List[Dict], walk_points: List) -> List[int]:
+    """按访问顺序，在步行折线上向前匹配每个站点（折返段不会匹配到去程上的同名点）。"""
+    cursor = 0
+    last = max(0, len(walk_points) - 1)
+    indices: List[int] = []
+    for poi in pois:
+        loc = poi.get("location") or [0, 0]
+        lng, lat = float(loc[0]), float(loc[1])
+        best_i = min(cursor, last)
+        best_d = float("inf")
+        for i in range(cursor, len(walk_points)):
+            px, py = _lng_lat(walk_points[i])
+            d = haversine(lng, lat, px, py)
+            if d < best_d:
+                best_d = d
+                best_i = i
+            if best_d < 80 and i > best_i + 8 and d > best_d + 120:
+                break
+        indices.append(best_i)
+        cursor = best_i
+    return indices
+
+
+def trim_backtrack_on_walk_polyline(
+        pois: List[Dict],
+        walk_points: List,
+        route_style: str = "balanced",
+) -> List[Dict]:
+    """真实步行线出来之后，丢掉沿该折线大幅折返的非种子站。
+
+    折返余量用 ROUTE_STYLE_CONFIG.backtrack_slack_m。种子（必去 / 用户加站）保留。
+    """
+    if not pois or not walk_points or len(walk_points) < 2:
+        return list(pois or [])
+
+    style_cfg = ROUTE_STYLE_CONFIG.get(route_style, ROUTE_STYLE_CONFIG["balanced"])
+    slack = float(style_cfg.get("backtrack_slack_m", 200))
+    indices = _visit_indices_on_walk(pois, walk_points)
+    kept: List[Dict] = []
+    prev_idx = 0
+    for poi, idx in zip(pois, indices):
+        segment = walk_points[prev_idx:idx + 1]
+        prior = walk_points[:prev_idx + 1]
+        overlap = _overlap_with_prior_m(segment, prior)
+        prev_idx = idx
+        if poi.get("is_seed") or overlap <= slack:
+            kept.append(poi)
+            continue
+        logging.info(
+            "步行线折返修剪：去掉「%s」（重合约 %dm，余量 %dm）",
+            poi.get("name", ""), int(overlap), int(slack),
+        )
+    return kept
+
+
+def drop_non_seed_stops_to_fit_plan(
+        pois: List[Dict],
+        plan_time: int,
+        walk_min: int,
+        visit_pace: str = "checkin",
+        poi_type: str = "",
+        ambience_profile: str = "",
+) -> List[Dict]:
+    """活动时间超过计划时，按分数从低到高丢掉非种子站，直到能装下或只剩种子。"""
+    kept = list(pois or [])
+    plan_time = int(plan_time)
+    walk_min = int(walk_min)
+    pace = normalize_visit_pace(visit_pace)
+
+    while kept:
+        non_seeds = [p for p in kept if not p.get("is_seed")]
+        if not non_seeds:
+            break
+        n = len(kept)
+        stay_budget = max(0, plan_time - walk_min)
+        if pace == "checkin":
+            per = _checkin_stay_cap(poi_type, ambience_profile, pace)
+        else:
+            cap = _poi_max_stay_min(poi_type, ambience_profile)
+            per = POI_STAY_MIN_M if stay_budget <= 0 else min(
+                cap, max(POI_STAY_MIN_M, stay_budget // max(n, 1)),
+            )
+        if walk_min + per * n <= plan_time:
+            break
+        victim = min(
+            non_seeds,
+            key=lambda p: (float(p.get("final_score") or 0), str(p.get("name") or "")),
+        )
+        kept = [p for p in kept if p is not victim]
+        logging.info(
+            "时长修剪：去掉「%s」，使步行+停留贴近计划 %d 分钟",
+            victim.get("name", ""), plan_time,
+        )
+    return kept
+
+
+def refine_stops_after_walk(
+        pois: List[Dict],
+        walk_points: Optional[List],
+        walk_min: int,
+        plan_time: int,
+        route_style: str = "balanced",
+        visit_pace: str = "checkin",
+        poi_type: str = "",
+        ambience_profile: str = "",
+) -> Tuple[List[Dict], bool]:
+    """先按真实步行线去折返，再按计划时长减站。返回 (新列表, 是否有站被去掉)。不请求步行接口。"""
+    working = list(pois or [])
+    before = [p.get("name") for p in working]
+    if walk_points and len(walk_points) >= 2 and working:
+        working = trim_backtrack_on_walk_polyline(working, walk_points, route_style)
+    working = drop_non_seed_stops_to_fit_plan(
+        working, plan_time, walk_min, visit_pace, poi_type, ambience_profile,
+    )
+    after = [p.get("name") for p in working]
+    return working, after != before
 
 
 def is_poi_in_target_city(poi: Dict, target_city: str = None) -> bool:
