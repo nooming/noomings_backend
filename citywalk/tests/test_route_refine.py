@@ -34,6 +34,18 @@ def _out_and_back():
     return pts
 
 
+def _same_points_out_and_back():
+    """向北走到 31.240，再沿同一串点走回 31.230。单程约 1.1 公里。"""
+    out = [(121.50, 31.230 + i * 0.001) for i in range(0, 11)]
+    return out + list(reversed(out[:-1]))
+
+
+def _pt_lng(name, lng, lat, score=5.0, seed=False):
+    poi = _pt(name, lat, score, seed)
+    poi["location"] = [lng, lat]
+    return poi
+
+
 class TestWalkRetraceTrim(unittest.TestCase):
     def test_drops_non_seed_that_retraces(self):
         walk = _out_and_back()
@@ -63,6 +75,74 @@ class TestWalkRetraceTrim(unittest.TestCase):
         pois = [_pt("甲", 31.233, 8), _pt("乙", 31.236, 7), _pt("丙", 31.239, 6)]
         kept = trim_backtrack_on_walk_polyline(pois, walk, "efficiency_first")
         self.assertEqual([p["name"] for p in kept], ["甲", "乙", "丙"])
+
+    def test_same_points_spur_drops_non_seed_keeps_seed(self):
+        walk = _same_points_out_and_back()
+        dropped = trim_backtrack_on_walk_polyline(
+            [_pt("沿途", 31.233, 8), _pt("远公园", 31.240, 7)],
+            walk,
+            "balanced",
+        )
+        self.assertEqual([p["name"] for p in dropped], ["沿途"])
+
+        kept = trim_backtrack_on_walk_polyline(
+            [_pt("沿途", 31.233, 8), _pt("必去远点", 31.240, 7, seed=True)],
+            walk,
+            "balanced",
+        )
+        self.assertEqual([p["name"] for p in kept], ["沿途", "必去远点"])
+
+    def test_parallel_return_within_40m_drops_spur_tip(self):
+        """回程偏开约 30 米（对侧人行道），仍应删掉支路尽头。"""
+        out = [(121.50, 31.230 + i * 0.001) for i in range(0, 11)]
+        back = [(121.50032, lat) for _lng, lat in reversed(out[:-1])]
+        walk = out + back
+        kept = trim_backtrack_on_walk_polyline(
+            [_pt("沿途", 31.233, 8), _pt("远公园", 31.240, 7)],
+            walk,
+            "balanced",
+        )
+        self.assertEqual([p["name"] for p in kept], ["沿途"])
+
+        seeded = trim_backtrack_on_walk_polyline(
+            [_pt("沿途", 31.233, 8), _pt("必去远点", 31.240, 1, seed=True)],
+            walk,
+            "balanced",
+        )
+        self.assertIn("必去远点", [p["name"] for p in seeded])
+
+    def test_spur_tip_dropped_onward_stop_kept(self):
+        """向南走到远点再原路返回，然后向东。删尽头，保留返回之后的站。"""
+        south = [(121.50, 31.240 - i * 0.001) for i in range(0, 11)]
+        back = list(reversed(south[:-1]))
+        east = [(121.50 + i * 0.001, 31.240) for i in range(1, 5)]
+        walk = south + back + east
+        kept = trim_backtrack_on_walk_polyline(
+            [
+                _pt("沿途", 31.236, 8),
+                _pt("远公园", 31.230, 7),
+                _pt_lng("东站", 121.504, 31.240, 6),
+            ],
+            walk,
+            "balanced",
+        )
+        names = [p["name"] for p in kept]
+        self.assertNotIn("远公园", names)
+        self.assertIn("沿途", names)
+        self.assertIn("东站", names)
+
+        seeded = trim_backtrack_on_walk_polyline(
+            [
+                _pt("沿途", 31.236, 8),
+                _pt("必去远点", 31.230, 1, seed=True),
+                _pt_lng("东站", 121.504, 31.240, 6),
+            ],
+            walk,
+            "balanced",
+        )
+        seed_names = [p["name"] for p in seeded]
+        self.assertIn("必去远点", seed_names)
+        self.assertIn("东站", seed_names)
 
 
 class TestFitPlanDuration(unittest.TestCase):

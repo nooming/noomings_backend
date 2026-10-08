@@ -685,8 +685,11 @@ def trim_backtrack_pois_toward_end(
     return kept if kept else [ordered[0]]
 
 
-# 真实步行线与已走过的线重合到这个距离内，才算折返（米）
-_WALK_RETRACE_NEAR_M = 28.0
+# 同路往返算折返的横向容差（米）。对侧人行道大约落在 40 米内。
+_WALK_RETRACE_NEAR_M = 40.0
+# 站点离这条折返最远点在这个距离内，才算支路尽头（米）。
+# 需小于测试里顺路「远站」到折返点的约 111 米，避免把顺路站删掉。
+_SPUR_APEX_NEAR_M = 100.0
 
 
 def _lng_lat(pt) -> Tuple[float, float]:
@@ -776,14 +779,121 @@ def _visit_indices_on_walk(pois: List[Dict], walk_points: List) -> List[int]:
     return indices
 
 
+def _prepare_walk_index(walk_points: List) -> Dict:
+    """局部投影网格，用来找「又回到早先某个点附近」。"""
+    lat0 = float(walk_points[0][1])
+    mx = 111320.0 * math.cos(math.radians(lat0))
+    my = 111320.0
+    xy = []
+    cum = [0.0]
+    prev = None
+    for pt in walk_points:
+        lng, lat = _lng_lat(pt)
+        xy.append((lng * mx, lat * my))
+        if prev is not None:
+            cum.append(cum[-1] + haversine(prev[0], prev[1], lng, lat))
+        prev = (lng, lat)
+    cell = 20.0
+    buckets: Dict[Tuple[int, int], List[int]] = {}
+    for i, (x, y) in enumerate(xy):
+        key = (int(math.floor(x / cell)), int(math.floor(y / cell)))
+        buckets.setdefault(key, []).append(i)
+    return {"xy": xy, "cum": cum, "buckets": buckets, "cell": cell}
+
+
+def _latest_near_before(index: Dict, walk_points: List, j: int, before: int, near_m: float):
+    """j 这个点 40 米内、且下标小于 before 的最晚一个点。"""
+    x, y = index["xy"][j]
+    cell = index["cell"]
+    cx = int(math.floor(x / cell))
+    cy = int(math.floor(y / cell))
+    span = int(math.ceil(near_m / cell)) + 1
+    jlng, jlat = _lng_lat(walk_points[j])
+    best = None
+    buckets = index["buckets"]
+    for gx in range(cx - span, cx + span + 1):
+        for gy in range(cy - span, cy + span + 1):
+            for i in buckets.get((gx, gy), ()):
+                if i >= before:
+                    continue
+                ilng, ilat = _lng_lat(walk_points[i])
+                if haversine(jlng, jlat, ilng, ilat) > near_m:
+                    continue
+                if best is None or i > best:
+                    best = i
+    return best
+
+
+def _apex_index(walk_points: List, i: int, j: int) -> int:
+    """折线 [i, j] 上离 i 最远的点，往返支路的尽头。"""
+    ax, ay = _lng_lat(walk_points[i])
+    best_k = i
+    best_d = -1.0
+    for k in range(i, j + 1):
+        bx, by = _lng_lat(walk_points[k])
+        d = haversine(ax, ay, bx, by)
+        if d > best_d:
+            best_d = d
+            best_k = k
+    return best_k
+
+
+def _back_leg_retraces(walk_points: List, i: int, apex: int, j: int) -> bool:
+    """从尽头走回来的那一段，有一半以上贴着去程。环线闭合不会误判。"""
+    if apex <= i or j <= apex:
+        return False
+    outbound = walk_points[i:apex + 1]
+    back = walk_points[apex:j + 1]
+    overlap = _overlap_with_prior_m(back, outbound)
+    back_len = 0.0
+    for t in range(apex, j):
+        ax, ay = _lng_lat(walk_points[t])
+        bx, by = _lng_lat(walk_points[t + 1])
+        back_len += haversine(ax, ay, bx, by)
+    if back_len < 1.0:
+        return False
+    return overlap >= back_len * 0.5
+
+
+def _is_spur_turnaround(walk_points: List, index: Dict, s: int, slack: float) -> bool:
+    """离开 s 之后又回到更早的点附近，且 s 就是这段往返的尽头。"""
+    n = len(walk_points)
+    if s <= 0 or s >= n - 1:
+        return False
+    sx, sy = _lng_lat(walk_points[s])
+    cum = index["cum"]
+    next_m = cum[s]
+    for j in range(s + 1, n):
+        if cum[j] < next_m and j != n - 1:
+            continue
+        next_m = cum[j] + 25.0
+        earlier = _latest_near_before(
+            index, walk_points, j, s, _WALK_RETRACE_NEAR_M,
+        )
+        if earlier is None:
+            continue
+        gap = cum[j] - cum[earlier]
+        if gap <= slack:
+            continue
+        apex = _apex_index(walk_points, earlier, j)
+        ax, ay = _lng_lat(walk_points[apex])
+        if haversine(sx, sy, ax, ay) > _SPUR_APEX_NEAR_M:
+            continue
+        if _back_leg_retraces(walk_points, earlier, apex, j):
+            return True
+    return False
+
+
 def trim_backtrack_on_walk_polyline(
         pois: List[Dict],
         walk_points: List,
         route_style: str = "balanced",
 ) -> List[Dict]:
-    """真实步行线出来之后，丢掉沿该折线大幅折返的非种子站。
+    """真实步行线出来之后，丢掉造成大幅折返的非种子站。
 
-    折返余量用 ROUTE_STYLE_CONFIG.backtrack_slack_m。种子（必去 / 用户加站）保留。
+    两类都删：走到尽头再沿原走廊走回来的支路（余量用 backtrack_slack_m，
+    约 200–400 米量级的额外步行）；以及必须贴着已走过的线才能到达的站。
+    种子（必去 / 用户加站）保留。
     """
     if not pois or not walk_points or len(walk_points) < 2:
         return list(pois or [])
@@ -791,6 +901,7 @@ def trim_backtrack_on_walk_polyline(
     style_cfg = ROUTE_STYLE_CONFIG.get(route_style, ROUTE_STYLE_CONFIG["balanced"])
     slack = float(style_cfg.get("backtrack_slack_m", 200))
     indices = _visit_indices_on_walk(pois, walk_points)
+    walk_index = _prepare_walk_index(walk_points)
     kept: List[Dict] = []
     prev_idx = 0
     for poi, idx in zip(pois, indices):
@@ -798,13 +909,28 @@ def trim_backtrack_on_walk_polyline(
         prior = walk_points[:prev_idx + 1]
         overlap = _overlap_with_prior_m(segment, prior)
         prev_idx = idx
-        if poi.get("is_seed") or overlap <= slack:
+        if poi.get("is_seed"):
             kept.append(poi)
             continue
-        logging.info(
-            "步行线折返修剪：去掉「%s」（重合约 %dm，余量 %dm）",
-            poi.get("name", ""), int(overlap), int(slack),
-        )
+        loc = poi.get("location") or [0, 0]
+        on_prior = _dist_to_polyline_m(
+            float(loc[0]), float(loc[1]), prior,
+        ) <= _WALK_RETRACE_NEAR_M
+        arrived_by_retrace = overlap > slack and on_prior
+        spur_tip = _is_spur_turnaround(walk_points, walk_index, idx, slack)
+        if not arrived_by_retrace and not spur_tip:
+            kept.append(poi)
+            continue
+        if spur_tip:
+            logging.info(
+                "步行线折返修剪：去掉「%s」（支路尽头往返超过余量 %dm）",
+                poi.get("name", ""), int(slack),
+            )
+        else:
+            logging.info(
+                "步行线折返修剪：去掉「%s」（来路重合约 %dm，余量 %dm）",
+                poi.get("name", ""), int(overlap), int(slack),
+            )
     return kept
 
 
