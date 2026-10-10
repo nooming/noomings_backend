@@ -378,6 +378,7 @@ def _execute_loop_plan_request(
 
     time_fields = _plan_time_response_fields(plan_time, total_duration, filtered_pois)
     optional_count = sum(1 for p in filtered_pois if p.get("optional"))
+    loop_walk_fails = loop_route.get("walking_segment_failures") or []
     route_tip = build_user_route_tip(
         mode="loop",
         poi_count=len(filtered_pois),
@@ -390,6 +391,7 @@ def _execute_loop_plan_request(
         seeds_exceed_plan=_seeds_exceed_plan(
             plan_time, time_fields["activity_total_min"], filtered_pois,
         ),
+        walking_segment_failures=loop_walk_fails,
     )
 
     meta["plan_stage"] = "complete"
@@ -398,6 +400,7 @@ def _execute_loop_plan_request(
         "mode": "loop",
         "message": "探索路线规划成功",
         "route_tip": route_tip,
+        "walking_segment_issues": loop_walk_fails,
         "plan_time_min": plan_time,
         "visit_pace": visit_pace,
         **time_fields,
@@ -743,6 +746,7 @@ def execute_plan_request(data: Dict[str, Any]) -> Tuple[dict, int, dict]:
         )
         optional_count = sum(1 for p in filtered_pois if p.get("optional"))
         degraded_route = not new_route_valid
+        walk_fails = new_route.get("walking_segment_failures") or []
         route_tip = build_user_route_tip(
             mode="route",
             poi_count=len(filtered_pois),
@@ -759,6 +763,7 @@ def execute_plan_request(data: Dict[str, Any]) -> Tuple[dict, int, dict]:
             seeds_exceed_plan=_seeds_exceed_plan(
                 plan_time, time_fields["activity_total_min"], filtered_pois,
             ),
+            walking_segment_failures=walk_fails,
         )
 
         meta["plan_stage"] = "complete"
@@ -767,6 +772,7 @@ def execute_plan_request(data: Dict[str, Any]) -> Tuple[dict, int, dict]:
             "mode": "route",
             "message": "路线规划成功" if not degraded_route else "已生成基础路线（部分地图服务受限）",
             "route_tip": route_tip,
+            "walking_segment_issues": walk_fails,
             "degraded_route": degraded_route,
             "plan_time_min": plan_time,
             **time_fields,

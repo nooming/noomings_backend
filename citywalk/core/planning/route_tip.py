@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """路线说明 route_tip 用户向文案。"""
 import re
-from typing import List
+from typing import Any, Dict, List, Optional
+
+from citywalk.core.planning.walking_merge import format_walking_segment_failure_tip
 
 _COORD_ADDRESS_RE = re.compile(r"^\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*$")
 
@@ -29,7 +31,8 @@ def build_user_route_tip(
         plan_time_min: int = 0,
         activity_total_min: int = 0,
         free_time_min: int = 0,
-        seeds_exceed_plan: bool = False) -> str:
+        seeds_exceed_plan: bool = False,
+        walking_segment_failures: Optional[List[Dict[str, Any]]] = None) -> str:
     """生成面向用户的路线说明，不含算法/性能内部表述。"""
     parts: List[str] = []
 
@@ -77,5 +80,9 @@ def build_user_route_tip(
 
     if degraded_route:
         parts.append("当前为起终点示意路线；打卡顺序请参考下方列表，稍后可重新规划。")
+
+    walk_fail_tip = format_walking_segment_failure_tip(walking_segment_failures or [])
+    if walk_fail_tip:
+        parts.append(walk_fail_tip)
 
     return " ".join(p for p in parts if p).strip()

@@ -60,5 +60,15 @@ class TestRouteTipCopy(unittest.TestCase):
         self.assertIn("示意路线", tip)
         self.assertNotIn("重试完整串点", tip)
 
+    def test_walk_segment_failures_in_tip(self):
+        tip = build_user_route_tip(
+            mode="route",
+            poi_count=2,
+            end_address="外滩",
+            walking_segment_failures=[{"index": 2, "from": "咖啡A", "to": "公园B"}],
+        )
+        self.assertIn("第 2 段", tip)
+        self.assertIn("直线连接", tip)
+
 if __name__ == "__main__":
     unittest.main()

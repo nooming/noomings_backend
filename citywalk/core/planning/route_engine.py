@@ -10,6 +10,7 @@ from citywalk.core.geo.amap_client import AmapQuotaError, api_request_with_retry
 from citywalk.core.geo.geo_utils import haversine, normalize_city_name
 from citywalk.core.planning.constants import *
 from citywalk.core.planning.plan_budget import AMAP_POOL_WORKERS, cap_waypoints_for_walking, compute_max_sample_points
+from citywalk.core.planning.walking_merge import build_walk_leg_labels, stitch_walk_segment_results
 from citywalk.core.planning.poi_selection import (
     DETOUR_EXTRA_SAMPLE,
     DETOUR_LATERAL_SAMPLE_M,
@@ -604,26 +605,30 @@ def generate_new_route(start: Tuple[float, float], end: Tuple[float, float],
     total_distance = 0
     total_walk_duration = 0
 
+    walking_segment_failures: List = []
     if segments:
-        # 并发规划各分段，再按 index 顺序拼接（保证路线点顺序正确）
         results: List[Optional[Tuple]] = [None] * len(segments)
         with ThreadPoolExecutor(
                 max_workers=min(2, len(segments))
         ) as executor:
             for seg_index, seg_points, seg_dist, seg_dur in executor.map(_fetch_segment, segments):
                 results[seg_index] = (seg_points, seg_dist, seg_dur)
-        for entry in results:
-            if not entry:
-                continue
-            seg_points, seg_dist, seg_dur = entry
-            all_route_points.extend(seg_points)
-            total_distance += seg_dist
-            total_walk_duration += seg_dur
+        poi_names = [(p.get("name") or "").strip() or f"第{i + 1}站" for i, p in enumerate(ordered_pois)]
+        leg_labels = build_walk_leg_labels(poi_names)
+        stitched = stitch_walk_segment_results(segments, results, leg_labels)
+        all_route_points = stitched["new_route_points"]
+        total_distance = stitched["new_total_distance"]
+        total_walk_duration = stitched["new_walk_duration"]
+        walking_segment_failures = stitched.get("walking_segment_failures") or []
+        if walking_segment_failures:
+            logging.warning(
+                "步行分段部分失败 count=%s labels=%s",
+                len(walking_segment_failures),
+                leg_labels,
+            )
 
-    # 如果分段规划失败，直接返回直线连接
-    if not all_route_points:
-        logging.error("所有分段路线规划失败，使用直线连接")
-        all_route_points = route_sequence
+    if not segments:
+        all_route_points = list(route_sequence)
 
     return {
         "new_route_points": all_route_points,
@@ -632,4 +637,5 @@ def generate_new_route(start: Tuple[float, float], end: Tuple[float, float],
         "new_total_duration": total_walk_duration,
         "waypoints": waypoints,
         "route_waypoints_truncated": route_waypoints_truncated,
+        "walking_segment_failures": walking_segment_failures,
     }

@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from citywalk.core.geo.amap_client import AmapQuotaError, api_request_with_retry
 from citywalk.core.geo.geo_utils import haversine
 from citywalk.core.planning.plan_budget import AMAP_POOL_WORKERS
+from citywalk.core.planning.walking_merge import build_walk_leg_labels, stitch_walk_segment_results
 
 logger = logging.getLogger(__name__)
 
@@ -209,25 +210,16 @@ def generate_loop_route(
         for idx, pts, dist, dur in pool.map(_run, segments):
             results[idx] = (pts, dist, dur)
 
-    all_route_points: List[Tuple[float, float]] = []
-    total_distance = 0
-    total_walk_duration = 0
-    for i in range(len(segments)):
-        entry = results.get(i)
-        if not entry:
-            continue
-        seg_points, seg_dist, seg_dur = entry
-        all_route_points.extend(seg_points)
-        total_distance += seg_dist
-        total_walk_duration += seg_dur
-
-    if not all_route_points:
-        all_route_points = list(route_sequence)
+    seg_result_list = [results.get(i) for i in range(len(segments))]
+    poi_names = [(p.get("name") or "").strip() or f"第{i + 1}站" for i, p in enumerate(pois_sorted)]
+    leg_labels = build_walk_leg_labels(poi_names, start_label="探索中心", end_label="回到中心")
+    stitched = stitch_walk_segment_results(segments, seg_result_list, leg_labels)
 
     return {
-        "new_route_points": all_route_points,
-        "new_total_distance": total_distance,
-        "new_walk_duration": total_walk_duration,
-        "new_total_duration": total_walk_duration,
+        "new_route_points": stitched["new_route_points"],
+        "new_total_distance": stitched["new_total_distance"],
+        "new_walk_duration": stitched["new_walk_duration"],
+        "new_total_duration": stitched["new_total_duration"],
         "waypoints": waypoints,
+        "walking_segment_failures": stitched.get("walking_segment_failures") or [],
     }
