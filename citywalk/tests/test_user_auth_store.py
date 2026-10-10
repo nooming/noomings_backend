@@ -4,7 +4,13 @@ import tempfile
 import unittest
 
 from citywalk.core.user_auth import issue_token, verify_token
-from citywalk.core.user_store import authenticate_user, get_user_footprints, register_user, save_user_footprints
+from citywalk.core.user_store import (
+    authenticate_user,
+    change_user_password,
+    get_user_footprints,
+    register_user,
+    save_user_footprints,
+)
 
 
 class TestUserAuthStore(unittest.TestCase):
@@ -27,6 +33,20 @@ class TestUserAuthStore(unittest.TestCase):
         prof2, err2 = authenticate_user("a@example.com", "password123")
         self.assertIsNone(err2)
         self.assertEqual(prof2["user_id"], profile["user_id"])
+
+    def test_change_password(self):
+        profile, _ = register_user("c@example.com", "oldpassword1")
+        uid = profile["user_id"]
+        _, err = change_user_password(uid, "wrong", "newpassword12")
+        self.assertTrue(err)
+        prof2, err2 = change_user_password(uid, "oldpassword1", "newpassword12")
+        self.assertIsNone(err2)
+        self.assertEqual(prof2["user_id"], uid)
+        _, err3 = authenticate_user("c@example.com", "oldpassword1")
+        self.assertTrue(err3)
+        prof3, err4 = authenticate_user("c@example.com", "newpassword12")
+        self.assertIsNone(err4)
+        self.assertEqual(prof3["user_id"], uid)
 
     def test_footprints_roundtrip(self):
         profile, _ = register_user("b@example.com", "longpassword")

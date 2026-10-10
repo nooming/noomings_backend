@@ -7,6 +7,7 @@ from flask import Blueprint, jsonify, request
 from citywalk.core.user_auth import issue_token, user_id_from_authorization_header
 from citywalk.core.user_store import (
     authenticate_user,
+    change_user_password,
     get_user_footprints,
     get_user_profile,
     register_user,
@@ -78,6 +79,35 @@ def auth_me():
     if not profile:
         return jsonify({"success": False, "message": "用户不存在"}), 404
     return jsonify({"success": True, "user": profile}), 200
+
+
+@bp.route("/auth/change-password", methods=["POST", "OPTIONS"])
+def auth_change_password():
+    if request.method == "OPTIONS":
+        return jsonify({"success": True})
+    uid = _current_user_id()
+    if not uid:
+        return jsonify({"success": False, "message": "未登录"}), 401
+    try:
+        payload = request.get_json(silent=True) or {}
+        profile, err = change_user_password(
+            uid,
+            payload.get("current_password") or "",
+            payload.get("new_password") or "",
+        )
+        if err:
+            status = 401 if "当前密码" in err else 400
+            return jsonify({"success": False, "message": err}), status
+        token = issue_token(profile["user_id"])
+        return jsonify({
+            "success": True,
+            "token": token,
+            "user": profile,
+            "message": "密码已更新",
+        }), 200
+    except Exception:
+        logging.exception("auth_change_password")
+        return jsonify({"success": False, "message": "修改密码暂不可用"}), 500
 
 
 @bp.route("/user/footprints", methods=["GET", "PUT", "OPTIONS"])

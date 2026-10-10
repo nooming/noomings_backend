@@ -15,7 +15,7 @@ from citywalk.core.user_auth import hash_password, normalize_email, verify_passw
 
 _USER_ID_RE = re.compile(r"^[a-f0-9-]{36}$")
 _DEFAULT_DIR = Path(__file__).resolve().parents[2] / "data" / "users"
-_MAX_SYNC_BYTES = 512 * 1024
+_MAX_SYNC_BYTES = 768 * 1024
 
 
 def _data_dir() -> Path:
@@ -66,6 +66,9 @@ def _empty_sync() -> Dict[str, Any]:
         "favorite_routes": [],
         "favorite_spots": [],
         "planned_routes": {},
+        "route_history": [],
+        "points_total": 0,
+        "points_events": [],
     }
 
 
@@ -180,6 +183,34 @@ def get_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def change_user_password(
+    user_id: str,
+    current_password: str,
+    new_password: str,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not _USER_ID_RE.match(user_id or ""):
+        return None, "用户不存在"
+    base = _data_dir()
+    doc = _read_user_doc(base, user_id)
+    if not doc:
+        return None, "用户不存在"
+    if not verify_password(doc.get("password_hash") or "", current_password or ""):
+        return None, "当前密码不正确"
+    if (current_password or "") == (new_password or ""):
+        return None, "新密码不能与当前密码相同"
+    new_hash = hash_password(new_password or "")
+    if not new_hash:
+        return None, "新密码至少 8 位"
+    doc["password_hash"] = new_hash
+    if not _write_user_doc(base, doc):
+        return None, "修改失败，请稍后再试"
+    return {
+        "user_id": user_id,
+        "email": doc.get("email"),
+        "display_name": doc.get("display_name"),
+    }, None
+
+
 def get_user_footprints(user_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     doc = _read_user_doc(_data_dir(), user_id)
     if not doc:
@@ -194,6 +225,9 @@ def get_user_footprints(user_id: str) -> Tuple[Optional[Dict[str, Any]], Optiona
         "favorite_routes": sync.get("favorite_routes") if isinstance(sync.get("favorite_routes"), list) else [],
         "favorite_spots": sync.get("favorite_spots") if isinstance(sync.get("favorite_spots"), list) else [],
         "planned_routes": sync.get("planned_routes") if isinstance(sync.get("planned_routes"), dict) else {},
+        "route_history": sync.get("route_history") if isinstance(sync.get("route_history"), list) else [],
+        "points_total": int(sync.get("points_total") or 0),
+        "points_events": sync.get("points_events") if isinstance(sync.get("points_events"), list) else [],
     }, None
 
 
@@ -207,6 +241,15 @@ def _validate_sync_payload(body: Dict[str, Any]) -> Optional[str]:
     planned = body.get("planned_routes")
     if planned is not None and not isinstance(planned, dict):
         return "planned_routes 须为对象"
+    if "route_history" in body and not isinstance(body.get("route_history"), list):
+        return "route_history 须为数组"
+    if "points_events" in body and not isinstance(body.get("points_events"), list):
+        return "points_events 须为数组"
+    if "points_total" in body:
+        try:
+            int(body.get("points_total") or 0)
+        except (TypeError, ValueError):
+            return "points_total 无效"
     try:
         size = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
     except (TypeError, ValueError):
@@ -232,6 +275,9 @@ def save_user_footprints(user_id: str, body: Dict[str, Any]) -> Tuple[Optional[D
         "favorite_routes": body.get("favorite_routes") or [],
         "favorite_spots": body.get("favorite_spots") or [],
         "planned_routes": body.get("planned_routes") if isinstance(body.get("planned_routes"), dict) else {},
+        "route_history": body.get("route_history") or [],
+        "points_total": max(0, int(body.get("points_total") or 0)),
+        "points_events": body.get("points_events") or [],
     }
     doc["sync"] = sync
     if not _write_user_doc(base, doc):
@@ -240,5 +286,8 @@ def save_user_footprints(user_id: str, body: Dict[str, Any]) -> Tuple[Optional[D
     return {
         "v": 1,
         "updated_at": now,
-        **{k: sync[k] for k in ("walked", "favorite_routes", "favorite_spots", "planned_routes")},
+        **{k: sync[k] for k in (
+            "walked", "favorite_routes", "favorite_spots", "planned_routes",
+            "route_history", "points_total", "points_events",
+        )},
     }, None
