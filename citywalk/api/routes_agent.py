@@ -9,7 +9,11 @@ from flask import Blueprint, jsonify, request
 
 from citywalk.core.geo.geocoding import resolve_location
 
-from citywalk.core.planning.plan_budget import MAX_PLAN_TIME_MIN, MIN_PLAN_TIME_MIN
+from citywalk.core.planning.plan_budget import (
+    AMAP_POOL_WORKERS,
+    MAX_PLAN_TIME_MIN,
+    MIN_PLAN_TIME_MIN,
+)
 from citywalk.core.planning.plan_service import execute_plan_request, fetch_poi_photos
 from citywalk.core.planning.poi_selection import normalize_poi_type
 from citywalk.core.planning.constants import ROUTE_STYLE_CONFIG
@@ -240,7 +244,11 @@ def agent_inspire():
         # 并发地理编码各候选点（executor.map 保序），解析失败者丢弃。
         # 串行 N 次高德调用既慢又增 CUQPS 风险，与仓内其它 fan-out 用法一致。
         def _geocode_spot(s):
-            coords = resolve_location(s["name"], city or None)
+            try:
+                coords = resolve_location(s["name"], city or None)
+            except Exception as exc:
+                logging.warning("灵感候选地理编码失败 name=%r: %s", s.get("name"), exc)
+                return None
             if not coords:
                 return None
             return {**s, "lng": coords[0], "lat": coords[1]}
