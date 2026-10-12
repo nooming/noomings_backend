@@ -2,9 +2,12 @@
 """Flask 路由：/agent/*、/poi/enrich。"""
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 from flask import Blueprint, jsonify, request
+
+from citywalk.core.geo.geocoding import resolve_location
 
 from citywalk.core.planning.plan_budget import MAX_PLAN_TIME_MIN, MIN_PLAN_TIME_MIN
 from citywalk.core.planning.plan_service import execute_plan_request, fetch_poi_photos
