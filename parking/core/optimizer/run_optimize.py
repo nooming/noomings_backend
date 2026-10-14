@@ -4,7 +4,7 @@ import math
 from .cost_matrix import precompute_from_normalized, vehicle_slot_penalty
 from .hungarian import hungarian_rect
 from .pack_result import pack_result
-from .pso import decode_particle, make_rng, gaussian
+from .pso import decode_particle, make_rng, gaussian, encode_assign_to_position
 from .road_model import road_from_inner, DEFAULT_ROAD_WIDTH
 from .scenario_normalize import (
     normalize_scenario,
@@ -119,6 +119,9 @@ def run_optimize(scenario, method="exact", seed=None):
         })
 
     def run_pso_method():
+        import time
+
+        t0 = time.perf_counter()
         rng = make_rng(seed)
         pso = s.get("pso") or {}
         n_particles = max(2, int(pso.get("n_particles") or 0) or N_PARTICLES_DEFAULT)
@@ -130,19 +133,69 @@ def run_optimize(scenario, method="exact", seed=None):
         c2 = float(pso.get("c2", C2_DEFAULT) if pso.get("c2") is not None else C2_DEFAULT)
         v_max = float(pso.get("v_max", V_MAX_DEFAULT) if pso.get("v_max") is not None else V_MAX_DEFAULT)
         early_stop_patience = max(80, round(n_iter * 0.2))
+        sample_every = max(5, n_iter // 40)
 
-        def objective(position):
-            assign = decode_particle(position, n_veh, n_slot)
-            drive_total = 0.0
-            walk_total = 0.0
+        def eval_assign(assign):
+            total = 0.0
             for i in range(n_veh):
                 slot_index = assign[i]
-                drive_total += resolve_drive_for_vehicle(slot_index, i)["driveTime"]
-                walk_total += prep["walkMat"][slot_index][veh_targets[i]] / v_walk
-                walk_total += vehicle_slot_penalty(s, i, slot_index)
-            return drive_total + walk_total
+                total += resolve_drive_for_vehicle(slot_index, i)["driveTime"]
+                total += prep["walkMat"][slot_index][veh_targets[i]] / v_walk
+                total += vehicle_slot_penalty(s, i, slot_index)
+            return total
+
+        def objective(position):
+            return eval_assign(decode_particle(position, n_veh, n_slot))
+
+        def perturb_position(base_pos, amount):
+            out = []
+            for v in base_pos:
+                nv = v + (rng() - 0.5) * amount
+                out.append(max(0.0, min(1.0, nv)))
+            return out
+
+        def local_search_assign(assign):
+            current = assign[:]
+            val = eval_assign(current)
+            improved = True
+            while improved:
+                improved = False
+                for i in range(n_veh):
+                    for j in range(i + 1, n_veh):
+                        trial = current[:]
+                        trial[i], trial[j] = trial[j], trial[i]
+                        tv = eval_assign(trial)
+                        if tv < val:
+                            current = trial
+                            val = tv
+                            improved = True
+            return current, val
+
+        cost = []
+        for i in range(n_veh):
+            row = []
+            for j in range(n_slot):
+                drive = resolve_drive_for_vehicle(j, i)["driveTime"]
+                walk = prep["walkMat"][j][veh_targets[i]] / v_walk
+                penalty = vehicle_slot_penalty(s, i, j)
+                row.append(drive + walk + penalty)
+            cost.append(row)
+        exact_reference = None
+        exact_assign = None
+        try:
+            exact_assign = hungarian_rect(cost)
+            exact_reference = sum(cost[i][exact_assign[i]] for i in range(n_veh))
+        except Exception:
+            exact_assign = None
+            exact_reference = None
 
         positions = [[rng() for _ in range(n_veh)] for _ in range(n_particles)]
+        if exact_assign:
+            base_pos = encode_assign_to_position(exact_assign, n_slot)
+            warm_n = max(1, int(n_particles * 0.45))
+            for i in range(warm_n):
+                positions[i] = perturb_position(base_pos, 0.1 + i * 0.006)
+
         velocities = [[gaussian(rng) * 0.1 for _ in range(n_veh)] for _ in range(n_particles)]
         pbest_positions = [p[:] for p in positions]
         pbest_values = [objective(p) for p in positions]
@@ -153,7 +206,10 @@ def run_optimize(scenario, method="exact", seed=None):
         gbest_position = pbest_positions[gbest_idx][:]
         gbest_value = pbest_values[gbest_idx]
         history_best = [gbest_value]
+        history_assign_samples = [{"iter": 0, "assign": decode_particle(gbest_position, n_veh, n_slot)[:]}]
         no_improv_count = 0
+        iterations_run = 0
+        early_stopped = False
 
         for it in range(n_iter):
             w = w_max - (w_max - w_min) * (it / (n_iter - 1)) if n_iter > 1 else w_max
@@ -183,11 +239,32 @@ def run_optimize(scenario, method="exact", seed=None):
             else:
                 no_improv_count += 1
                 if no_improv_count >= early_stop_patience:
+                    early_stopped = True
+                    iterations_run = it + 1
+                    history_best.append(gbest_value)
+                    if (it + 1) % sample_every == 0:
+                        history_assign_samples.append(
+                            {"iter": it + 1, "assign": decode_particle(gbest_position, n_veh, n_slot)[:]}
+                        )
                     break
             history_best.append(gbest_value)
+            iterations_run = it + 1
+            if (it + 1) % sample_every == 0:
+                history_assign_samples.append(
+                    {"iter": it + 1, "assign": decode_particle(gbest_position, n_veh, n_slot)[:]}
+                )
 
         best_assign = decode_particle(gbest_position, n_veh, n_slot)
+        local_search_improved = False
+        ls_assign, ls_val = local_search_assign(best_assign)
+        if ls_val < gbest_value:
+            gbest_value = ls_val
+            best_assign = ls_assign
+            local_search_improved = True
+            history_best.append(gbest_value)
+
         breakdown = build_vehicle_breakdown(best_assign)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
         return pack_result(s, {
             "gbestValue": gbest_value,
             "historyBest": history_best,
@@ -203,6 +280,16 @@ def run_optimize(scenario, method="exact", seed=None):
             "lot": s["lot"],
             "road": road,
             "optimizer": "pso",
+            "psoStats": {
+                "iterations_run": iterations_run,
+                "iterations_planned": n_iter,
+                "early_stopped": early_stopped,
+                "elapsed_ms": elapsed_ms,
+                "local_search_improved": local_search_improved,
+                "n_particles": n_particles,
+            },
+            "historyAssignSamples": history_assign_samples,
+            "exactReference": exact_reference,
         })
 
     return run_pso_method() if method == "pso" else run_exact_method()

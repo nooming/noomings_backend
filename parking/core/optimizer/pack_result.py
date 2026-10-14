@@ -59,4 +59,7 @@ def pack_result(s, opts):
             for seg in build_road_segments_from_road(opts.get("road") or {})
         ],
         "optimizer": opts["optimizer"],
+        "pso_stats": opts.get("psoStats"),
+        "history_assign_samples": opts.get("historyAssignSamples"),
+        "exact_reference": opts.get("exactReference"),
     }
