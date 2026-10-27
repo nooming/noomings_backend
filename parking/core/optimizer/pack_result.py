@@ -62,4 +62,7 @@ def pack_result(s, opts):
         "pso_stats": opts.get("psoStats"),
         "history_assign_samples": opts.get("historyAssignSamples"),
         "exact_reference": opts.get("exactReference"),
+        "objective_metrics": opts.get("objectiveMetrics"),
+        "composite_cost": opts.get("compositeCost"),
+        "base_total_time": opts.get("baseTotalTime"),
     }

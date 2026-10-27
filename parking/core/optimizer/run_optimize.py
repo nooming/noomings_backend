@@ -16,6 +16,11 @@ from .scenario_normalize import (
     C2_DEFAULT,
     V_MAX_DEFAULT,
 )
+from parking.core.simulator.objective_metrics import (
+    parse_objective_weights,
+    compute_objective_metrics,
+    composite_cost,
+)
 
 
 def run_optimize(scenario, method="exact", seed=None):
@@ -49,6 +54,23 @@ def run_optimize(scenario, method="exact", seed=None):
     entrance_count = len(prep["entrancesPos"]) or 1
     v_car = 10.0
     v_walk = 1.5
+    obj_weights = parse_objective_weights(scenario=s)
+
+    def fitness_from_items(items, base_sum):
+        if not obj_weights["entrance_balance"] and not obj_weights["fairness_range"]:
+            return base_sum
+        metrics = compute_objective_metrics(items)
+        return composite_cost(metrics, obj_weights)
+
+    def enrich_result_opts(breakdown_items, base_value, opts):
+        metrics = compute_objective_metrics(breakdown_items)
+        comp = composite_cost(metrics, obj_weights)
+        weighted = obj_weights["entrance_balance"] or obj_weights["fairness_range"]
+        opts["gbestValue"] = comp if weighted else base_value
+        opts["objectiveMetrics"] = metrics
+        opts["compositeCost"] = comp
+        opts["baseTotalTime"] = base_value
+        return opts
 
     def resolve_drive_for_vehicle(slot_index, veh_idx):
         if entrance_mode == "fixed":
@@ -101,8 +123,7 @@ def run_optimize(scenario, method="exact", seed=None):
         best_assign = hungarian_rect(cost)
         gbest_value = sum(cost[i][best_assign[i]] for i in range(n_veh))
         breakdown = build_vehicle_breakdown(best_assign)
-        return pack_result(s, {
-            "gbestValue": gbest_value,
+        opts = enrich_result_opts(breakdown["items"], gbest_value, {
             "historyBest": [gbest_value],
             "bestAssign": best_assign,
             "bestEntrances": breakdown["bestEntrances"],
@@ -117,6 +138,9 @@ def run_optimize(scenario, method="exact", seed=None):
             "road": road,
             "optimizer": "exact",
         })
+        if obj_weights["entrance_balance"] or obj_weights["fairness_range"]:
+            opts["historyBest"] = [opts["gbestValue"]]
+        return pack_result(s, opts)
 
     def run_pso_method():
         import time
@@ -136,13 +160,22 @@ def run_optimize(scenario, method="exact", seed=None):
         sample_every = max(5, n_iter // 40)
 
         def eval_assign(assign):
-            total = 0.0
+            items = []
             for i in range(n_veh):
                 slot_index = assign[i]
-                total += resolve_drive_for_vehicle(slot_index, i)["driveTime"]
-                total += prep["walkMat"][slot_index][veh_targets[i]] / v_walk
-                total += vehicle_slot_penalty(s, i, slot_index)
-            return total
+                drive = resolve_drive_for_vehicle(slot_index, i)
+                walk_time = prep["walkMat"][slot_index][veh_targets[i]] / v_walk
+                penalty = vehicle_slot_penalty(s, i, slot_index)
+                items.append({
+                    "drive_time": drive["driveTime"],
+                    "walk_time": walk_time,
+                    "penalty": penalty,
+                    "total_time": drive["driveTime"] + walk_time + penalty,
+                    "entrance_index": drive["entranceIndex"],
+                    "destination_index": veh_targets[i],
+                })
+            base = sum(it["total_time"] for it in items)
+            return fitness_from_items(items, base)
 
         def objective(position):
             return eval_assign(decode_particle(position, n_veh, n_slot))
@@ -265,8 +298,8 @@ def run_optimize(scenario, method="exact", seed=None):
 
         breakdown = build_vehicle_breakdown(best_assign)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        return pack_result(s, {
-            "gbestValue": gbest_value,
+        base_total = sum(it["total_time"] for it in breakdown["items"])
+        opts = enrich_result_opts(breakdown["items"], base_total, {
             "historyBest": history_best,
             "bestAssign": best_assign,
             "bestEntrances": breakdown["bestEntrances"],
@@ -291,5 +324,6 @@ def run_optimize(scenario, method="exact", seed=None):
             "historyAssignSamples": history_assign_samples,
             "exactReference": exact_reference,
         })
+        return pack_result(s, opts)
 
     return run_pso_method() if method == "pso" else run_exact_method()

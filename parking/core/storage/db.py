@@ -36,11 +36,16 @@ def init_db():
                 payload_json TEXT,
                 result_json TEXT,
                 error TEXT,
+                progress_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
             """
         )
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN progress_json TEXT")
+        except sqlite3.OperationalError:
+            pass
 
 
 def _now():
@@ -119,18 +124,42 @@ def create_job(kind, payload):
     return jid
 
 
-def update_job(jid, status, result=None, error=None):
+def update_job(jid, status, result=None, error=None, progress=None):
     now = _now()
+    progress_json = json.dumps(progress, ensure_ascii=False) if progress is not None else None
+    with _conn() as conn:
+        if progress is not None:
+            conn.execute(
+                "UPDATE jobs SET status=?, result_json=?, error=?, progress_json=?, updated_at=? WHERE id=?",
+                (
+                    status,
+                    json.dumps(result, ensure_ascii=False) if result is not None else None,
+                    error,
+                    progress_json,
+                    now,
+                    jid,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE jobs SET status=?, result_json=?, error=?, updated_at=? WHERE id=?",
+                (
+                    status,
+                    json.dumps(result, ensure_ascii=False) if result is not None else None,
+                    error,
+                    now,
+                    jid,
+                ),
+            )
+
+
+def update_job_progress(jid, progress):
+    now = _now()
+    progress_json = json.dumps(progress, ensure_ascii=False)
     with _conn() as conn:
         conn.execute(
-            "UPDATE jobs SET status=?, result_json=?, error=?, updated_at=? WHERE id=?",
-            (
-                status,
-                json.dumps(result, ensure_ascii=False) if result is not None else None,
-                error,
-                now,
-                jid,
-            ),
+            "UPDATE jobs SET progress_json=?, updated_at=? WHERE id=?",
+            (progress_json, now, jid),
         )
 
 
@@ -146,6 +175,7 @@ def get_job(jid):
         "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
         "result": json.loads(row["result_json"]) if row["result_json"] else None,
         "error": row["error"],
+        "progress": json.loads(row["progress_json"]) if row["progress_json"] else None,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

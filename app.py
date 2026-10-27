@@ -33,11 +33,23 @@ logging.basicConfig(
 )
 
 
+_LOCAL_DEV_ORIGINS = (
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+)
+
+
 def _cors_origins() -> list:
     raw = os.environ.get("CORS_ORIGINS", "").strip()
-    if raw:
-        return [o.strip() for o in raw.split(",") if o.strip()]
-    return ["*"]
+    if not raw:
+        return ["*"]
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    for o in _LOCAL_DEV_ORIGINS:
+        if o not in origins:
+            origins.append(o)
+    return origins
 
 
 def apply_cors(flask_app):

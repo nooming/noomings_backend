@@ -114,7 +114,7 @@ Citywalk 提供城市步行路线规划，支持直接规划与 LLM 智能体两
 | `core/simulator/` | 场景运行模拟 |
 | `core/storage/` | SQLite 方案库与任务状态（默认 `parking/data/parking_pso.db`） |
 
-主要端点：`/api/parking/scenarios`（CRUD）、`/api/parking/optimize`（PSO）、`/api/parking/simulate` + WebSocket 进度流。Golden 测试见 `parking/tests/fixtures/default-scenario.json`。
+主要端点：`/api/parking/scenarios`（CRUD）、`/api/parking/optimize`、`/api/parking/simulate`（静态方案 + 到达/入口排队仿真）、`/api/parking/simulate-rolling`（在线滚动分配，不预知未来到达）+ WebSocket 进度流。Golden 测试见 `parking/tests/fixtures/default-scenario.json`。
 
 ## 七、Zeabur 部署
 
