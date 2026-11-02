@@ -4,6 +4,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
+    PORT=8080 \
     FLASK_DEBUG=false \
     DATABASE_PATH=/data/parking_pso.db
 
