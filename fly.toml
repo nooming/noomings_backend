@@ -1,0 +1,30 @@
+# Fly.io · Citywalk + Parking API（香港）
+# 首次：fly launch --no-deploy 或 fly apps create 后 fly deploy
+# 卷：fly volumes create data --region hkg --size 1
+
+app = 'noomings-backend'
+primary_region = 'hkg'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  FLASK_DEBUG = 'false'
+  DATABASE_PATH = '/data/parking_pso.db'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
+
+[[mounts]]
+  source = 'data'
+  destination = '/data'
