@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-noomings 后端入口（Citywalk + Parking 共用 Flask 应用）。
-业务逻辑见 citywalk/、parking/。
+noomings 后端入口（Citywalk）。
+
+停车方案已迁移为纯本地前端，不再由本服务提供。
 """
 import logging
 import os
@@ -10,7 +11,6 @@ from pathlib import Path
 
 from flask import Flask, jsonify
 from flask_cors import CORS
-from flask_sock import Sock
 
 _BACKEND_ROOT = Path(__file__).resolve().parent
 if str(_BACKEND_ROOT) not in sys.path:
@@ -68,7 +68,6 @@ def apply_cors(flask_app):
 
 app = Flask(__name__)
 apply_cors(app)
-sock = Sock(app)
 
 
 @app.route("/")
@@ -77,29 +76,25 @@ def index():
     return jsonify({
         "service": "noomings-backend",
         "apps": {
-            "citywalk": "https://nooming.github.io/app/citywalk/",
-            "parking-pso": "https://nooming.github.io/app/parking-pso/",
+            "citywalk": "https://noomings.com/app/citywalk/",
         },
         "api": {
             "health": "/api/health",
             "citywalk": "/api/citywalk/",
-            "parking": "/api/parking/",
         },
     }), 200
 
 
 from citywalk.api import register_blueprints as register_citywalk  # noqa: E402
-from parking.api import register_blueprints as register_parking  # noqa: E402
 from citywalk.api.routes_config import bp as bp_config  # noqa: E402
 
 register_citywalk(app)
-register_parking(app, sock)
 app.register_blueprint(bp_config, url_prefix="/api")
 
 
 @app.route("/api/health")
 def api_health():
-    return jsonify({"ok": True, "services": ["citywalk", "parking"]})
+    return jsonify({"ok": True, "services": ["citywalk"]})
 
 
 if __name__ == "__main__":

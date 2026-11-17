@@ -5,8 +5,7 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
     PORT=8080 \
-    FLASK_DEBUG=false \
-    DATABASE_PATH=/data/parking_pso.db
+    FLASK_DEBUG=false
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir \
@@ -16,8 +15,6 @@ RUN pip install --no-cache-dir \
     -r requirements.txt
 
 COPY . .
-
-RUN mkdir -p /data
 
 EXPOSE 8080
 
