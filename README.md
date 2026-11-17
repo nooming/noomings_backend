@@ -72,27 +72,29 @@ noomings_backend/
 - 直接规划：`POST /api/citywalk/plan`
 - 智能体规划：`/api/citywalk/agent/*`
 
-## 六、部署
+## 六、部署状态
 
-| 项 | 值 |
-|---|---|
-| Root Directory | 本目录 |
-| Start Command | `python app.py` |
-| 生产 UI | `https://noomings.com/app/citywalk/` |
-| API | `https://api.noomings.com` |
+当前 **暂缓部署**。`noomings.com` 只提供静态前端，Citywalk 未上线：
 
-`CORS_ORIGINS` 示例：
+- 前端 `/app/citywalk/` 返回 404
+- 没有 `api.noomings.com`
+- 不启动容器，不占用服务器 8080
+- 不恢复首页和顶栏入口
 
-```text
-https://noomings.com,https://www.noomings.com
-```
+未来恢复时再补：
+
+- 后端容器或进程
+- 反向代理与 HTTPS
+- `CORS_ORIGINS`
+- 账号 / UGC 合规
+- 公安备案与隐私说明
 
 ## 七、停车
 
-停车不再调用本后端。相关前端在：
+停车已改为纯本地前端，不再调用本后端：
 
 ```text
 app/parking-pso/
 ```
 
-历史 Python 实现已归档到 `../archive/parking-backend-20261117/`，仅用于算法对照。
+历史 Python 实现和数据库已删除，仅保留前端本地版本。
