@@ -9,7 +9,11 @@ ENV PYTHONUNBUFFERED=1 \
     DATABASE_PATH=/data/parking_pso.db
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir \
+    --default-timeout=300 \
+    -i https://mirrors.cloud.tencent.com/pypi/simple \
+    --trusted-host mirrors.cloud.tencent.com \
+    -r requirements.txt
 
 COPY . .
 

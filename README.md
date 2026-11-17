@@ -8,7 +8,7 @@ Zeabur 统一部署单元：`app.py` 同时提供 **Citywalk** 路线规划与 *
 | Parking | https://nooming.github.io/app/parking-pso/ | `/api/parking/*` |
 | 公共 | — | `/api/health`、`/api/config/public` |
 
-线上 API：**https://noomings-backend.zeabur.app**
+线上 API：**https://api.noomings.com**（腾讯云 Docker；GitHub Pages 前端已指向该地址）
 
 ## 环境要求
 
@@ -124,7 +124,7 @@ Citywalk 提供城市步行路线规划，支持直接规划与 LLM 智能体两
 | Start Command | `python app.py` |
 | 生产 UI（Citywalk） | https://nooming.github.io/app/citywalk/ |
 | 生产 UI（Parking） | https://nooming.github.io/app/parking-pso/ |
-| API | https://noomings-backend.zeabur.app |
+| API | https://api.noomings.com |
 
 `CORS_ORIGINS` 示例：`https://noomings.com,https://www.noomings.com,https://nooming.github.io,https://www.nooming.github.io`
 
